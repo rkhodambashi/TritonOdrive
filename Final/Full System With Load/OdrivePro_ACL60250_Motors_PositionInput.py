@@ -28,8 +28,8 @@ try:
     time.sleep(2.0) """
 
     # ---- Gains ----
-    odrv0.axis0.controller.config.pos_gain = 120.0
-    odrv0.axis0.controller.config.vel_gain = 0.05
+    odrv0.axis0.controller.config.pos_gain = 20.0
+    odrv0.axis0.controller.config.vel_gain = 0.15
     odrv0.axis0.controller.config.vel_integrator_gain = 0.1
 
     # ---- Enter Closed Loop ----
@@ -83,12 +83,12 @@ try:
 
         # ---- Final readings ----
         motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
-        motor_based_output = (motor_pos - startup_motor_pos) / GEAR_RATIO
-        output_encoder = odrv0.spi_encoder0.raw
+        motor_based_output = (motor_pos - startup_motor_pos) *360/ GEAR_RATIO
+        output_encoder = 7.014041-odrv0.spi_encoder0.raw*360.0  # convert to degrees
 
         print("\nMove Complete:")
-        print(f"Motor/2040:      {motor_based_output:.6f} turns")
-        print(f"Output Encoder:  {output_encoder:.6f} turns")
+        print(f"Motor/2040:      {motor_based_output:.6f} degrees")
+        print(f"Output Encoder:  {output_encoder:.6f} degrees")
 
 except KeyboardInterrupt:
     print("\n[STOP] Disarming...")
