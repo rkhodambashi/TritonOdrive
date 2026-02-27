@@ -2,8 +2,8 @@ import time
 
 # ------------------ CONFIGURATION ------------------
 GEAR_RATIO = 1020.0           # Motor turns per 1 output turn
-POSITION_TOL = 0.001           # Motor turns tolerance for "settled"
-VELOCITY_TOL = 0.001           # Motor turns/sec tolerance for "settled"
+POSITION_TOL = 0.07           # Motor turns tolerance for "settled"
+VELOCITY_TOL = 0.001          # Motor turns/sec tolerance for "settled"
 
 MAX_DEGREE = 85               # Mechanical soft limit
 MIN_DEGREE = -85
@@ -38,24 +38,37 @@ try:
     output_abs_turns = odrv0.spi_encoder0.raw
     odrv0.axis0.pos_vel_mapper.set_abs_pos(output_abs_turns * GEAR_RATIO)
     startup_motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
+    current_motor_pos = startup_motor_pos
+
+    # ---- Calculate fixed motor home position ----
+    # This corresponds to 0° vertical using SPI_HOME_RAW
+    MOTOR_HOME = current_motor_pos + (0.0 - raw_to_output_deg(odrv0.spi_encoder0.raw, SPI_HOME_RAW)) / 360.0 * GEAR_RATIO
+
+    # Clamp MOTOR_HOME to stay within mechanical limits
+    max_motor_turns = startup_motor_pos + MAX_DEGREE / 360.0 * GEAR_RATIO
+    min_motor_turns = startup_motor_pos + MIN_DEGREE / 360.0 * GEAR_RATIO
+    if MOTOR_HOME > max_motor_turns:
+        print(f"[WARNING] Calculated home above MAX_DEGREE, clamping to {MAX_DEGREE}°")
+        MOTOR_HOME = max_motor_turns
+    elif MOTOR_HOME < min_motor_turns:
+        print(f"[WARNING] Calculated home below MIN_DEGREE, clamping to {MIN_DEGREE}°")
+        MOTOR_HOME = min_motor_turns
 
     # ---- Move to home position at startup (if enabled) ----
     if GO_TO_HOME_ON_STARTUP:
-        # Calculate motor turns corresponding to 0° (vertical)
-        target_motor_turns = startup_motor_pos + (0.0 / 360.0) * GEAR_RATIO
-        odrv0.axis0.controller.input_pos = target_motor_turns
-
-        # Wait until motion completes
+        odrv0.axis0.controller.input_pos = MOTOR_HOME
         while True:
             motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
             motor_vel = odrv0.axis0.pos_vel_mapper.vel
-            pos_error = abs(target_motor_turns - motor_pos)
-            vel_abs = abs(motor_vel)
-            if pos_error < POSITION_TOL and vel_abs < VELOCITY_TOL:
-                time.sleep(0.1)
+            pos_error = abs(MOTOR_HOME - motor_pos)
+            if pos_error < POSITION_TOL:
+                time.sleep(0.001)
                 break
-            time.sleep(0.01)
+            time.sleep(0.001)
         print("Startup move complete: Axis at home (vertical)")
+        #odrv0.axis0.requested_state = 1  # Disarm after reaching home
+        #time.sleep(0.1)
+        #odrv0.axis0.requested_state = 8  # Re-enable for user control
 
     # ---- Store SPI offset at home ----
     spi_home_offset = odrv0.spi_encoder0.raw
@@ -87,10 +100,11 @@ try:
         # Convert output degrees to output turns
         target_output_turns = target_output_deg / 360.0
 
-        # Convert output turns to motor turns relative to startup
-        target_motor_turns = startup_motor_pos + target_output_turns * GEAR_RATIO
+        # Convert output turns to motor turns relative to home
+        target_motor_turns = MOTOR_HOME + target_output_turns * GEAR_RATIO
 
         # Command motor
+        odrv0.axis0.requested_state = 8  # Ensure closed-loop
         odrv0.axis0.controller.input_pos = target_motor_turns
 
         # Wait until motion completes
@@ -100,13 +114,13 @@ try:
             pos_error = abs(target_motor_turns - motor_pos)
             vel_abs = abs(motor_vel)
             if pos_error < POSITION_TOL and vel_abs < VELOCITY_TOL:
-                time.sleep(0.1)  # settle
+                time.sleep(0.001)
                 break
-            time.sleep(0.01)
+            time.sleep(0.001)
 
         # Final readings
         motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
-        motor_based_output = (motor_pos - startup_motor_pos) * 360 / GEAR_RATIO
+        motor_based_output = (motor_pos - MOTOR_HOME) * 360 / GEAR_RATIO
         output_encoder = raw_to_output_deg(odrv0.spi_encoder0.raw, spi_home_offset)
 
         print("\nMove Complete:")
@@ -114,9 +128,10 @@ try:
         print(f"Output Encoder:   {output_encoder:.3f}°")
         print(f"Raw:              {odrv0.spi_encoder0.raw}")
 
+        #odrv0.axis0.requested_state = 1  # Disarm after each move
+
 except KeyboardInterrupt:
     print("\n[STOP] Disarming...")
 
 finally:
     odrv0.axis0.requested_state = 1
-
