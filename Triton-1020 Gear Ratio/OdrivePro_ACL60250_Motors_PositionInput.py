@@ -10,6 +10,10 @@ MIN_DEGREE = -85
 MAX_OUTPUT_TURNS = MAX_DEGREE / 360.0
 MIN_OUTPUT_TURNS = MIN_DEGREE / 360.0
 
+def raw_to_output_deg(raw):
+    raw_min = 0.1502474546432495
+    return -438.0 * (raw - raw_min) + 85
+
 try:
     odrv0.clear_errors()
 
@@ -49,19 +53,22 @@ try:
     print("Enter desired output position in turns (q to quit)")
 
     while True:
-        user_input = input("\nTarget output turns: ")
+        user_input = input("\nTarget output degrees: ")
         if user_input.lower() == 'q':
             break
 
-        target_output_turns = float(user_input)
+        target_output_degrees = float(user_input)
 
         # Enforce mechanical limits
-        if target_output_turns > MAX_OUTPUT_TURNS:
-            print(f"Exceeds max limit {MAX_OUTPUT_TURNS:.3f}, clamping")
-            target_output_turns = MAX_OUTPUT_TURNS
-        elif target_output_turns < MIN_OUTPUT_TURNS:
-            print(f"Exceeds min limit {MIN_OUTPUT_TURNS:.3f}, clamping")
-            target_output_turns = MIN_OUTPUT_TURNS
+        if target_output_degrees > MAX_DEGREE:
+            print(f"Exceeds max limit {MAX_DEGREE}°, clamping")
+            target_output_degrees = MAX_DEGREE
+        elif target_output_degrees < MIN_DEGREE:
+            print(f"Exceeds min limit {MIN_DEGREE}°, clamping")
+            target_output_degrees = MIN_DEGREE  
+        
+        # Convert output degrees to output turns
+        target_output_turns = target_output_degrees / 360.0
 
         # Convert output turns to motor turns, relative to startup
         target_motor_turns = startup_motor_pos + target_output_turns * GEAR_RATIO
@@ -84,15 +91,19 @@ try:
         # ---- Final readings ----
         motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
         motor_based_output = (motor_pos - startup_motor_pos) *360/ GEAR_RATIO
-        output_encoder = odrv0.spi_encoder0.raw*360.0  # convert to degrees
+        #output_encoder = odrv0.spi_encoder0.raw*360.0  # convert to degrees
+        output_encoder = raw_to_output_deg(odrv0.spi_encoder0.raw)
 
         print("\nMove Complete:")
-        print(f"Motor/1020:      {motor_based_output:.6f} degrees")
-        print(f"Output Encoder:  {output_encoder:.6f} degrees")
-        print("raw:", odrv0.spi_encoder0.raw)
+        print(f"Motor-based:      {motor_based_output:.3f}°")
+        print(f"Output Encoder:   {output_encoder:.3f}°")
+        print(f"Raw:              {odrv0.spi_encoder0.raw}")
 
 except KeyboardInterrupt:
     print("\n[STOP] Disarming...")
 
 finally:
     odrv0.axis0.requested_state = 1
+
+
+
