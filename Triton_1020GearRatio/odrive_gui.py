@@ -78,6 +78,16 @@ def apply_gains():
         pass
 
 
+def apply_gains_small():
+    try:
+        p = float(pos_gain_entry_small.get())
+        v = float(vel_gain_entry_small.get())
+        vi = float(vel_i_entry_small.get())
+        control.set_gains(p, v, vi)
+    except:
+        pass
+
+
 # ---------------- TRAJECTORY ----------------
 def apply_traj():
     try:
@@ -95,7 +105,6 @@ class LivePlotFrame(ttk.LabelFrame):
 
         self.interval_var = tk.DoubleVar(value=0.1)
 
-        # --- Controls ---
         control_frame = ttk.Frame(self)
         control_frame.pack(fill="x", padx=5, pady=5)
 
@@ -106,7 +115,6 @@ class LivePlotFrame(ttk.LabelFrame):
         ttk.Button(control_frame, text="Stop Logging", command=self.stop_logging).pack(side="left", padx=5)
         ttk.Button(control_frame, text="Save CSV", command=self.save_csv).pack(side="left", padx=5)
 
-        # --- Matplotlib Figure ---
         self.fig = Figure(figsize=(8, 6), dpi=100)
         self.ax = self.fig.add_subplot(111)
         self.ax.set_title("Commanded vs SPI Output")
@@ -186,15 +194,12 @@ root.geometry("1000x650")
 main_frame = ttk.Frame(root)
 main_frame.pack(fill="both", expand=True)
 
-# Left frame for buttons/settings
 left_frame = ttk.Frame(main_frame, width=300)
 left_frame.pack(side="left", fill="y", padx=10, pady=10)
 
-# Right frame for plot
 right_frame = ttk.Frame(main_frame)
 right_frame.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
-# CONNECT
 ttk.Button(left_frame, text="Connect ODrive", command=connect_odrive).pack(pady=5)
 
 status_label = ttk.Label(left_frame, text="Not Connected")
@@ -202,19 +207,16 @@ status_label.pack()
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# POSITION DISPLAY
 ttk.Label(left_frame, text="Current Position:").pack()
 position_var = tk.StringVar(value="0.000 °")
 ttk.Label(left_frame, textvariable=position_var, font=("Arial", 16)).pack(pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# HOME BUTTON
 ttk.Button(left_frame, text="Go Home", command=go_home).pack(pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# RELATIVE MOVES
 ttk.Label(left_frame, text="Relative Move").pack(pady=5)
 
 rel_frame = ttk.Frame(left_frame)
@@ -227,7 +229,6 @@ ttk.Button(rel_frame, text="+10°", command=lambda: move_relative(10)).grid(row=
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# ABSOLUTE MOVE
 ttk.Label(left_frame, text="Absolute Move (°)").pack()
 abs_entry = ttk.Entry(left_frame)
 abs_entry.pack(pady=5)
@@ -235,49 +236,70 @@ ttk.Button(left_frame, text="Move Absolute", command=move_absolute).pack(pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# GAINS SECTION
+# ---------------- GAINS SECTION ----------------
 ttk.Label(left_frame, text="Controller Gains").pack(pady=5)
 
-ttk.Label(left_frame, text="Position Gain").pack()
-pos_gain_entry = ttk.Entry(left_frame)
+gains_frame = ttk.Frame(left_frame)
+gains_frame.pack()
+
+# First gain set
+ttk.Label(gains_frame, text="Position Gain").grid(row=0, column=0)
+pos_gain_entry = ttk.Entry(gains_frame, width=8)
 pos_gain_entry.insert(0, "50")
-pos_gain_entry.pack()
+pos_gain_entry.grid(row=0, column=1, padx=5)
 
-ttk.Label(left_frame, text="Velocity Gain").pack()
-vel_gain_entry = ttk.Entry(left_frame)
+ttk.Label(gains_frame, text="Velocity Gain").grid(row=1, column=0)
+vel_gain_entry = ttk.Entry(gains_frame, width=8)
 vel_gain_entry.insert(0, "0.15")
-vel_gain_entry.pack()
+vel_gain_entry.grid(row=1, column=1, padx=5)
 
-ttk.Label(left_frame, text="Velocity Integrator Gain").pack()
-vel_i_entry = ttk.Entry(left_frame)
-vel_i_entry.insert(0, "0.1")
-vel_i_entry.pack()
+ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=2, column=0)
+vel_i_entry = ttk.Entry(gains_frame, width=8)
+vel_i_entry.insert(0, "1")
+vel_i_entry.grid(row=2, column=1, padx=5)
 
-ttk.Button(left_frame, text="Apply Gains", command=apply_gains).pack(pady=5)
+ttk.Button(gains_frame, text="Apply Gains", command=apply_gains).grid(row=3, column=0, columnspan=2, pady=5)
+
+# Second gain set
+ttk.Label(gains_frame, text="Position Gain").grid(row=0, column=2, padx=10)
+pos_gain_entry_small = ttk.Entry(gains_frame, width=8)
+pos_gain_entry_small.insert(0, "100")
+pos_gain_entry_small.grid(row=0, column=3)
+
+ttk.Label(gains_frame, text="Velocity Gain").grid(row=1, column=2)
+vel_gain_entry_small = ttk.Entry(gains_frame, width=8)
+vel_gain_entry_small.insert(0, "0.2")
+vel_gain_entry_small.grid(row=1, column=3)
+
+ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=2, column=2)
+vel_i_entry_small = ttk.Entry(gains_frame, width=8)
+vel_i_entry_small.insert(0, "5")
+vel_i_entry_small.grid(row=2, column=3)
+
+ttk.Button(gains_frame, text="Apply Gains", command=apply_gains_small).grid(row=3, column=2, columnspan=2, pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
-# TRAJECTORY SECTION
+# ---------------- TRAJECTORY SECTION ----------------
 ttk.Label(left_frame, text="Trajectory Parameters").pack(pady=5)
 
 ttk.Label(left_frame, text="Velocity Limit").pack()
 traj_vel_entry = ttk.Entry(left_frame)
-traj_vel_entry.insert(0, "500")
+traj_vel_entry.insert(0, "50")
 traj_vel_entry.pack()
 
 ttk.Label(left_frame, text="Acceleration Limit").pack()
 traj_acc_entry = ttk.Entry(left_frame)
-traj_acc_entry.insert(0, "1000")
+traj_acc_entry.insert(0, "100")
 traj_acc_entry.pack()
 
 ttk.Label(left_frame, text="Deceleration Limit").pack()
 traj_dec_entry = ttk.Entry(left_frame)
-traj_dec_entry.insert(0, "1000")
+traj_dec_entry.insert(0, "100")
 traj_dec_entry.pack()
 
 ttk.Button(left_frame, text="Apply Trajectory", command=apply_traj).pack(pady=5)
 
-# Plot on right side
 plot_frame = LivePlotFrame(right_frame)
 plot_frame.pack(fill="both", expand=True)
 
