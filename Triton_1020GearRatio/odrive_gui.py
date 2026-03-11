@@ -14,6 +14,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from satellite_tracking import SatelliteTrackingWindow
 
 odrv0 = None
 
@@ -97,6 +98,11 @@ def apply_traj():
         control.set_traj_params(vel, acc, dec)
     except:
         pass
+
+def open_satellite_tracking():
+    #import satellite_tracking
+    # pass the currently connected odrive object
+    SatelliteTrackingWindow(root, odrv0=odrv0, control=control, observer_lat=0.0, observer_lon=0.0)
 
 
 class LivePlotFrame(ttk.LabelFrame):
@@ -299,6 +305,13 @@ traj_dec_entry.insert(0, "100")
 traj_dec_entry.pack()
 
 ttk.Button(left_frame, text="Apply Trajectory", command=apply_traj).pack(pady=5)
+
+ttk.Separator(left_frame).pack(fill="x", pady=10)
+
+# ---------------- TRACKING SECTION ----------------
+ttk.Label(left_frame, text="Tracking GUI").pack(pady=5)
+#ttk.Button(left_frame, text="Satellite Tracking", command=lambda: SatelliteTrackingWindow(root)).pack(pady=10)
+ttk.Button(left_frame, text="Satellite Tracking", command=open_satellite_tracking).pack(pady=5)
 
 plot_frame = LivePlotFrame(right_frame)
 plot_frame.pack(fill="both", expand=True)
