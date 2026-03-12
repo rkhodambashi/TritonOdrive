@@ -3,11 +3,11 @@ import odrive
 
 # ------------------ CONFIGURATION ------------------
 GEAR_RATIO = 1020.0           # Motor turns per 1 output turn
-POSITION_TOL = 0.07           # Motor turns tolerance for "settled"
+POSITION_TOL = 0.05           # Motor turns tolerance for "settled"
 VELOCITY_TOL = 0.001          # Motor turns/sec tolerance for "settled"
 
-MAX_DEGREE = 85               # Mechanical soft limit
-MIN_DEGREE = -85
+MAX_DEGREE = 90               # Mechanical soft limit
+MIN_DEGREE = -90
 
 SPI_HOME_RAW = 0.34885120391845703  # SPI encoder raw value at vertical (installation)
 GO_TO_HOME_ON_STARTUP = True        # True = move to home on power-on
