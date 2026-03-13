@@ -1,4 +1,3 @@
-# OdrivePro_ACL60250_Motors_PositionInput.py
 import time
 import odrive
 
@@ -10,7 +9,7 @@ VELOCITY_TOL = 0.001          # Motor turns/sec tolerance for "settled"
 MAX_DEGREE = 90               # Mechanical soft limit
 MIN_DEGREE = -90
 
-SPI_HOME_RAW = 0.4863780736923218 #0.34885120391845703  # SPI encoder raw value at vertical (installation)
+SPI_HOME_RAW = 0.34885120391845703  # SPI encoder raw value at vertical (installation)
 GO_TO_HOME_ON_STARTUP = True        # True = move to home on power-on
 
 odrv0 = odrive.find_any(serial_number="3665337E3432")
@@ -19,8 +18,8 @@ def raw_to_output_deg(raw, home_offset):
     """
     Convert SPI raw reading to degrees relative to home (vertical)
     """
-    # slope = -438.0  # calibrated scaling
-    return (raw - home_offset)*360
+    slope = -438.0  # calibrated scaling
+    return slope * (raw - home_offset)
 
 
 
@@ -113,10 +112,7 @@ def move_relative(delta_deg):
 
 def get_current_position():
     motor_pos = odrv0.axis0.pos_vel_mapper.pos_rel
-    output_deg = (motor_pos - MOTOR_HOME) * 360.0 / GEAR_RATIO
-    return output_deg
-    # return (motor_pos - MOTOR_HOME) * 360.0 / GEAR_RATIO
-    # return odrv0.axis0.load_encoder.pos_estimate * 360.0
+    return (motor_pos - MOTOR_HOME) * 360.0 / GEAR_RATIO
 
 
 def set_gains(pos_gain, vel_gain, vel_i):

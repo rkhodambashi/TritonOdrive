@@ -1,6 +1,6 @@
 #odrive_gui.py
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
 import threading
 import odrive
 import time
@@ -16,8 +16,6 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from satellite_tracking import SatelliteTrackingWindow
-
-from satellite_tracking import Xangle, Yangle
 
 odrv0 = None
 
@@ -106,54 +104,6 @@ def open_satellite_tracking():
     #import satellite_tracking
     # pass the currently connected odrive object
     SatelliteTrackingWindow(root, odrv0=odrv0, control=control, observer_lat=0.0, observer_lon=0.0)
-
-def open_manual_pointing():
-
-    window = tk.Toplevel(root)
-    window.title("Manual Pointing")
-    window.geometry("350x300")
-
-    ttk.Label(window, text="Enter Azimuth (deg)").pack()
-    az_entry = ttk.Entry(window)
-    az_entry.pack()
-
-    ttk.Label(window, text="Enter Elevation (deg)").pack()
-    el_entry = ttk.Entry(window)
-    el_entry.pack()
-
-    ttk.Label(window, text="Enter X Angle (deg)").pack()
-    x_entry = ttk.Entry(window)
-    x_entry.pack()
-
-    ttk.Label(window, text="Enter Y Angle (deg)").pack()
-    y_entry = ttk.Entry(window)
-    y_entry.pack()
-
-    def point_from_azel():
-        try:
-            az = float(az_entry.get())
-            el = float(el_entry.get())
-
-            x = Xangle(az, el)
-            y = Yangle(az, el)
-
-            control.move_absolute(x)
-
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    def point_from_xy():
-        try:
-            x = float(x_entry.get())
-            y = float(y_entry.get())
-
-            control.move_absolute(x)
-
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
-    ttk.Button(window, text="Point using AZ/EL", command=point_from_azel).pack(pady=10)
-    ttk.Button(window, text="Point using X/Y", command=point_from_xy).pack(pady=10)
 
 
 class LivePlotFrame(ttk.LabelFrame):
@@ -363,55 +313,6 @@ ttk.Separator(left_frame).pack(fill="x", pady=10)
 ttk.Label(left_frame, text="Tracking GUI").pack(pady=5)
 #ttk.Button(left_frame, text="Satellite Tracking", command=lambda: SatelliteTrackingWindow(root)).pack(pady=10)
 ttk.Button(left_frame, text="Satellite Tracking", command=open_satellite_tracking).pack(pady=5)
-
-ttk.Separator(left_frame).pack(fill="x", pady=10)
-# ---------------- MANUAL POINTING SECTION ----------------
-ttk.Label(left_frame, text="Manual Pointing").pack(pady=5)
-
-# AZ/EL inputs with X/Y display
-az_frame = ttk.Frame(left_frame)
-az_frame.pack(pady=2, fill="x")
-ttk.Label(az_frame, text="Azimuth (°)").grid(row=0, column=0)
-manual_az_entry = ttk.Entry(az_frame, width=10)
-manual_az_entry.grid(row=0, column=1, padx=2)
-ttk.Label(az_frame, text="X →").grid(row=0, column=2)
-manual_x_display = ttk.Label(az_frame, text="0.0", width=8)
-manual_x_display.grid(row=0, column=3)
-
-el_frame = ttk.Frame(left_frame)
-el_frame.pack(pady=2, fill="x")
-ttk.Label(el_frame, text="Elevation (°)").grid(row=0, column=0)
-manual_el_entry = ttk.Entry(el_frame, width=10)
-manual_el_entry.grid(row=0, column=1, padx=2)
-ttk.Label(el_frame, text="Y →").grid(row=0, column=2)
-manual_y_display = ttk.Label(el_frame, text="0.0", width=8)
-manual_y_display.grid(row=0, column=3)
-
-def update_xy_display(*args):
-    try:
-        az = float(manual_az_entry.get())
-        el = float(manual_el_entry.get())
-        x = Xangle(az, el)
-        y = Yangle(az, el)
-        manual_x_display.config(text=f"{x:.2f}")
-        manual_y_display.config(text=f"{y:.2f}")
-    except:
-        manual_x_display.config(text="0.0")
-        manual_y_display.config(text="0.0")
-
-manual_az_entry.bind("<KeyRelease>", update_xy_display)
-manual_el_entry.bind("<KeyRelease>", update_xy_display)
-
-def apply_azel():
-    try:
-        x = float(manual_x_display.cget("text"))
-        y = float(manual_y_display.cget("text"))
-        control.move_absolute(x)
-        # optionally move Y if second axis exists
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-
-ttk.Button(left_frame, text="Point using AZ/EL", command=apply_azel).pack(pady=5)
 
 plot_frame = LivePlotFrame(right_frame)
 plot_frame.pack(fill="both", expand=True)
