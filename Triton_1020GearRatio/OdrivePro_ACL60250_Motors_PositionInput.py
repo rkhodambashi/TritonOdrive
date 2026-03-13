@@ -3,7 +3,7 @@ import time
 import odrive
 
 # ------------------ CONFIGURATION ------------------
-GEAR_RATIO = 1020.0           # Motor turns per 1 output turn
+GEAR_RATIO = 1240.0           # Motor turns per 1 output turn
 POSITION_TOL = 0.05           # Motor turns tolerance for "settled"
 VELOCITY_TOL = 0.001          # Motor turns/sec tolerance for "settled"
 
@@ -53,10 +53,11 @@ def initialize(odrive_instance):
 
     # Compute fixed MOTOR_HOME
     current_motor_pos = startup_motor_pos
-    MOTOR_HOME = current_motor_pos + (
-        (0.0 - raw_to_output_deg(odrv0.spi_encoder0.raw, SPI_HOME_RAW))
-        / 360.0 * GEAR_RATIO
-    )
+    # MOTOR_HOME = current_motor_pos + (
+    #     (0.0 - raw_to_output_deg(odrv0.spi_encoder0.raw, SPI_HOME_RAW))
+    #     / 360.0 * GEAR_RATIO
+    # )
+    MOTOR_HOME = current_motor_pos - (odrv0.spi_encoder0.raw - SPI_HOME_RAW) * GEAR_RATIO
 
     # Clamp
     max_motor_turns = startup_motor_pos + MAX_DEGREE / 360.0 * GEAR_RATIO
@@ -184,6 +185,7 @@ if __name__ == "__main__":
 
         # ---- Store SPI offset at home ----
         spi_home_offset = odrv0.spi_encoder0.raw
+        print("Motor home:", spi_home_offset)
 
         print("\n--- OUTPUT POSITION CONTROL ACTIVE ---")
         print(f"Allowed range: {MIN_DEGREE}° to {MAX_DEGREE}°")

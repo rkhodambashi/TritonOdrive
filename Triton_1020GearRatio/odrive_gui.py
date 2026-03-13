@@ -49,8 +49,14 @@ def update_position_loop():
     try:
         pos = control.get_current_position()
         position_var.set(f"{pos:.3f} °")
+
+        if odrv0 is not None:
+            spi_raw_var.set(f"{odrv0.spi_encoder0.raw:.6f}")
+            motor_raw_var.set(f"{odrv0.axis0.pos_vel_mapper.pos_rel:.6f}")
+
     except:
         pass
+
     root.after(100, update_position_loop)
 
 
@@ -267,6 +273,15 @@ ttk.Separator(left_frame).pack(fill="x", pady=10)
 ttk.Label(left_frame, text="Current Position:").pack()
 position_var = tk.StringVar(value="0.000 °")
 ttk.Label(left_frame, textvariable=position_var, font=("Arial", 16)).pack(pady=5)
+
+# --- RAW ENCODER VALUES ---
+ttk.Label(left_frame, text="Motor Encoder (turns)").pack()
+motor_raw_var = tk.StringVar(value="0")
+ttk.Label(left_frame, textvariable=motor_raw_var).pack()
+
+ttk.Label(left_frame, text="SPI Encoder (turns)").pack()
+spi_raw_var = tk.StringVar(value="0")
+ttk.Label(left_frame, textvariable=spi_raw_var).pack()
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
