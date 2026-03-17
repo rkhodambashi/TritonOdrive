@@ -23,23 +23,16 @@ DEFAULT_TRAJ_VEL_LIMIT = 50.0
 DEFAULT_TRAJ_ACCEL_LIMIT = 100.0
 DEFAULT_TRAJ_DECEL_LIMIT = 100.0
 
-DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD = -10.0
-DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD = 10.0
-
 AXIS_CONFIG = {
     "x": {
         "serial_number": "3665337E3432",
         "spi_home_raw": X_SPI_HOME_RAW,
         "output_sign": -1.0,
-        "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
-        "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
     "y": {
         "serial_number": "367F337A3432",
         "spi_home_raw": Y_SPI_HOME_RAW,
         "output_sign": -1.0,
-        "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
-        "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
 }
 
@@ -158,8 +151,6 @@ def initialize(odrive_instance, axis="x"):
     state = AXIS_STATE[axis]
     spi_home_raw = AXIS_CONFIG[axis]["spi_home_raw"]
     output_sign = AXIS_CONFIG[axis]["output_sign"]
-    spinout_mech_threshold = AXIS_CONFIG[axis]["spinout_mechanical_power_threshold"]
-    spinout_elec_threshold = AXIS_CONFIG[axis]["spinout_electrical_power_threshold"]
 
     state["odrive"] = odrive_instance
 
@@ -167,8 +158,6 @@ def initialize(odrive_instance, axis="x"):
     odrive_instance.axis0.controller.config.pos_gain = DEFAULT_POS_GAIN
     odrive_instance.axis0.controller.config.vel_gain = DEFAULT_VEL_GAIN
     odrive_instance.axis0.controller.config.vel_integrator_gain = DEFAULT_VEL_INTEGRATOR_GAIN
-    odrive_instance.axis0.controller.config.spinout_mechanical_power_threshold = spinout_mech_threshold
-    odrive_instance.axis0.controller.config.spinout_electrical_power_threshold = spinout_elec_threshold
     odrive_instance.axis0.trap_traj.config.vel_limit = DEFAULT_TRAJ_VEL_LIMIT
     odrive_instance.axis0.trap_traj.config.accel_limit = DEFAULT_TRAJ_ACCEL_LIMIT
     odrive_instance.axis0.trap_traj.config.decel_limit = DEFAULT_TRAJ_DECEL_LIMIT

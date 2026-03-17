@@ -25,13 +25,6 @@ log_y_cmd_deg = []
 log_y_spi_deg = []
 
 
-def _safe_call(func, fallback=None):
-    try:
-        return func()
-    except Exception:
-        return fallback
-
-
 def _set_entry(entry, value):
     entry.delete(0, tk.END)
     entry.insert(0, value)
@@ -82,73 +75,19 @@ def connect_odrive():
 
 
 def update_position_loop():
-    x_position = _safe_call(lambda: control.get_current_position("x"))
-    x_spi_raw = _safe_call(lambda: control.get_spi_raw("x"))
-    x_motor_raw = _safe_call(lambda: control.get_motor_raw("x"))
-    x_state = _safe_call(lambda: control.get_axis_state("x"))
-    x_active_errors = _safe_call(lambda: control.get_active_errors("x"))
-    x_disarm = _safe_call(lambda: control.get_disarm_reason("x"))
-    x_procedure_result = _safe_call(lambda: control.get_procedure_result("x"))
-    x_input_pos = _safe_call(lambda: control.get_input_pos("x"))
-    x_velocity = _safe_call(lambda: control.get_motor_velocity("x"))
+    try:
+        x_position_var.set(f"{control.get_current_position('x'):.3f} deg")
+        x_spi_raw_var.set(f"{control.get_spi_raw('x'):.6f}")
+        x_motor_raw_var.set(f"{control.get_motor_raw('x'):.6f}")
+    except Exception:
+        pass
 
-    if x_position is not None:
-        x_position_var.set(f"{x_position:.3f} deg")
-    if x_spi_raw is not None:
-        x_spi_raw_var.set(f"{x_spi_raw:.6f}")
-    if x_motor_raw is not None:
-        x_motor_raw_var.set(f"{x_motor_raw:.6f}")
-
-    x_fault_var.set(
-        f"State: {x_state if x_state is not None else '-'}   "
-        f"Disarm: 0x{x_disarm:X}" if x_disarm is not None else f"State: {x_state if x_state is not None else '-'}   Disarm: -"
-    )
-    if x_active_errors is not None:
-        x_fault_var.set(f"{x_fault_var.get()}   Active: 0x{x_active_errors:X}")
-    else:
-        x_fault_var.set(f"{x_fault_var.get()}   Active: -")
-    x_fault_var.set(f"{x_fault_var.get()}   Proc: {x_procedure_result if x_procedure_result is not None else '-'}")
-
-    x_diag_var.set(
-        f"Cmd: {f'{x_input_pos:.6f}' if x_input_pos is not None else '-'}   "
-        f"Motor: {f'{x_motor_raw:.6f}' if x_motor_raw is not None else '-'}   "
-        f"Vel: {f'{x_velocity:.6f}' if x_velocity is not None else '-'}   "
-        f"Angle: {f'{x_position:.3f}' if x_position is not None else '-'}"
-    )
-
-    y_position = _safe_call(lambda: control.get_current_position("y"))
-    y_spi_raw = _safe_call(lambda: control.get_spi_raw("y"))
-    y_motor_raw = _safe_call(lambda: control.get_motor_raw("y"))
-    y_state = _safe_call(lambda: control.get_axis_state("y"))
-    y_active_errors = _safe_call(lambda: control.get_active_errors("y"))
-    y_disarm = _safe_call(lambda: control.get_disarm_reason("y"))
-    y_procedure_result = _safe_call(lambda: control.get_procedure_result("y"))
-    y_input_pos = _safe_call(lambda: control.get_input_pos("y"))
-    y_velocity = _safe_call(lambda: control.get_motor_velocity("y"))
-
-    if y_position is not None:
-        y_position_var.set(f"{y_position:.3f} deg")
-    if y_spi_raw is not None:
-        y_spi_raw_var.set(f"{y_spi_raw:.6f}")
-    if y_motor_raw is not None:
-        y_motor_raw_var.set(f"{y_motor_raw:.6f}")
-
-    y_fault_var.set(
-        f"State: {y_state if y_state is not None else '-'}   "
-        f"Disarm: 0x{y_disarm:X}" if y_disarm is not None else f"State: {y_state if y_state is not None else '-'}   Disarm: -"
-    )
-    if y_active_errors is not None:
-        y_fault_var.set(f"{y_fault_var.get()}   Active: 0x{y_active_errors:X}")
-    else:
-        y_fault_var.set(f"{y_fault_var.get()}   Active: -")
-    y_fault_var.set(f"{y_fault_var.get()}   Proc: {y_procedure_result if y_procedure_result is not None else '-'}")
-
-    y_diag_var.set(
-        f"Cmd: {f'{y_input_pos:.6f}' if y_input_pos is not None else '-'}   "
-        f"Motor: {f'{y_motor_raw:.6f}' if y_motor_raw is not None else '-'}   "
-        f"Vel: {f'{y_velocity:.6f}' if y_velocity is not None else '-'}   "
-        f"Angle: {f'{y_position:.3f}' if y_position is not None else '-'}"
-    )
+    try:
+        y_position_var.set(f"{control.get_current_position('y'):.3f} deg")
+        y_spi_raw_var.set(f"{control.get_spi_raw('y'):.6f}")
+        y_motor_raw_var.set(f"{control.get_motor_raw('y'):.6f}")
+    except Exception:
+        pass
 
     root.after(100, update_position_loop)
 
@@ -471,20 +410,12 @@ x_status_frame.pack(fill="x", pady=2)
 ttk.Label(x_status_frame, text="X Axis").grid(row=0, column=0, sticky="w")
 x_position_var = tk.StringVar(value="0.000 deg")
 ttk.Label(x_status_frame, textvariable=x_position_var, font=("Arial", 14)).grid(row=0, column=1, sticky="w", padx=8)
-x_fault_var = tk.StringVar(value="State: -   Disarm: -   Active: -   Proc: -")
-ttk.Label(x_status_frame, textvariable=x_fault_var).grid(row=1, column=0, columnspan=2, sticky="w")
-x_diag_var = tk.StringVar(value="Cmd: -   Motor: -   Vel: -   Angle: -")
-ttk.Label(x_status_frame, textvariable=x_diag_var).grid(row=2, column=0, columnspan=2, sticky="w")
 
 y_status_frame = ttk.Frame(left_frame)
 y_status_frame.pack(fill="x", pady=2)
 ttk.Label(y_status_frame, text="Y Axis").grid(row=0, column=0, sticky="w")
 y_position_var = tk.StringVar(value="0.000 deg")
 ttk.Label(y_status_frame, textvariable=y_position_var, font=("Arial", 14)).grid(row=0, column=1, sticky="w", padx=8)
-y_fault_var = tk.StringVar(value="State: -   Disarm: -   Active: -   Proc: -")
-ttk.Label(y_status_frame, textvariable=y_fault_var).grid(row=1, column=0, columnspan=2, sticky="w")
-y_diag_var = tk.StringVar(value="Cmd: -   Motor: -   Vel: -   Angle: -")
-ttk.Label(y_status_frame, textvariable=y_diag_var).grid(row=2, column=0, columnspan=2, sticky="w")
 
 raw_frame = ttk.Frame(left_frame)
 raw_frame.pack(fill="x", pady=5)
