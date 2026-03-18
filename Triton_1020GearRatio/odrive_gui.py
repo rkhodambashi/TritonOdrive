@@ -238,7 +238,7 @@ def apply_traj_y():
 
 
 def open_satellite_tracking():
-    SatelliteTrackingWindow(root, odrvs=axis_devices, control=control, observer_lat=0.0, observer_lon=0.0)
+    SatelliteTrackingWindow(root, odrvs=axis_devices, control=control, observer_lat=33.677, observer_lon=-112.093)
 
 
 def open_manual_pointing():

@@ -31,6 +31,7 @@ AXIS_CONFIG = {
         "serial_number": "3665337E3432",
         "spi_home_raw": X_SPI_HOME_RAW,
         "output_sign": -1.0,
+        "spi_sign": 1.0,
         "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
         "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
@@ -38,6 +39,7 @@ AXIS_CONFIG = {
         "serial_number": "367F337A3432",
         "spi_home_raw": Y_SPI_HOME_RAW,
         "output_sign": -1.0,
+        "spi_sign": 1.0,
         "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
         "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
@@ -280,9 +282,11 @@ def get_current_position(axis="x"):
 
 
 def get_spi_position(axis="x"):
+    _validate_axis(axis)
     state = _get_state(axis)
-    output_sign = AXIS_CONFIG[axis]["output_sign"]
-    return raw_to_output_deg(state["odrive"].spi_encoder0.raw, state["spi_home_offset"]) * output_sign
+    spi_sign = AXIS_CONFIG[axis]["spi_sign"]
+    spi_home_raw = AXIS_CONFIG[axis]["spi_home_raw"]
+    return raw_to_output_deg(state["odrive"].spi_encoder0.raw, spi_home_raw) * spi_sign
 
 
 def set_gains(pos_gain, vel_gain, vel_i, axis="x"):
