@@ -8,6 +8,11 @@ from tkinter import filedialog, messagebox, ttk
 from skyfield.api import EarthSatellite, Topos, load, utc
 
 EPS = 1e-10
+TRACK_COMMAND_INTERVAL_SEC = 0.05
+TRAJECTORY_HORIZON_SEC = 2.0
+TRAJECTORY_POINT_SPACING_SEC = 0.05
+TRAJECTORY_REBUILD_MARGIN_SEC = 0.25
+PREPOINT_LEAD_TIME_SEC = 30.0
 
 
 def Kvector(AZ, EL):
@@ -65,9 +70,98 @@ def update_odrive_axes(x_angle_deg, y_angle_deg, control):
     x_angle_deg = max(min(x_angle_deg, 90), -90)
     y_angle_deg = max(min(y_angle_deg, 90), -90)
     try:
-        control.move_absolute_pair(x_deg=x_angle_deg, y_deg=y_angle_deg)
+        control.command_absolute_pair(x_deg=x_angle_deg, y_deg=y_angle_deg)
     except Exception as e:
         print(f"ODrive move error: {e}")
+
+
+def build_tracking_trajectory(ts, observer, sat, start_time_utc, horizon_sec, spacing_sec):
+    difference = sat - observer
+    points = []
+
+    steps = max(2, int(horizon_sec / spacing_sec) + 1)
+    for index in range(steps):
+        offset_sec = index * spacing_sec
+        sample_time = start_time_utc + datetime.timedelta(seconds=offset_sec)
+        t = ts.from_datetime(sample_time)
+        topocentric = difference.at(t)
+        el, az, distance = topocentric.altaz()
+
+        az_deg = az.degrees
+        el_deg = el.degrees
+
+        points.append(
+            {
+                "offset_sec": offset_sec,
+                "az_deg": az_deg,
+                "el_deg": el_deg,
+                "x_angle": Xangle(az_deg, el_deg),
+                "y_angle": Yangle(az_deg, el_deg),
+                "visible": el_deg >= 0,
+            }
+        )
+
+    return points
+
+
+def sample_tracking_trajectory(points, elapsed_sec):
+    if not points:
+        return None
+
+    if elapsed_sec <= points[0]["offset_sec"]:
+        return points[0]
+
+    if elapsed_sec >= points[-1]["offset_sec"]:
+        return points[-1]
+
+    for left, right in zip(points, points[1:]):
+        if left["offset_sec"] <= elapsed_sec <= right["offset_sec"]:
+            span = right["offset_sec"] - left["offset_sec"]
+            alpha = 0.0 if span <= 0 else (elapsed_sec - left["offset_sec"]) / span
+
+            return {
+                "az_deg": left["az_deg"] + (right["az_deg"] - left["az_deg"]) * alpha,
+                "el_deg": left["el_deg"] + (right["el_deg"] - left["el_deg"]) * alpha,
+                "x_angle": left["x_angle"] + (right["x_angle"] - left["x_angle"]) * alpha,
+                "y_angle": left["y_angle"] + (right["y_angle"] - left["y_angle"]) * alpha,
+                "visible": left["visible"] or right["visible"],
+            }
+
+    return points[-1]
+
+
+def get_next_rise_time(ts, observer, sat, search_hours=24):
+    t0 = ts.now()
+    t1 = ts.from_datetime(datetime.datetime.utcnow().replace(tzinfo=utc) + datetime.timedelta(hours=search_hours))
+
+    try:
+        times, events = sat.find_events(observer, t0, t1, altitude_degrees=0.0)
+    except Exception:
+        return None
+
+    for ti, event in zip(times, events):
+        if event == 0:
+            return ti.utc_datetime().replace(tzinfo=utc)
+
+    return None
+
+
+def get_pointing_sample(ts, observer, sat, sample_time_utc):
+    t = ts.from_datetime(sample_time_utc)
+    difference = sat - observer
+    topocentric = difference.at(t)
+    el, az, distance = topocentric.altaz()
+
+    az_deg = az.degrees
+    el_deg = el.degrees
+
+    return {
+        "az_deg": az_deg,
+        "el_deg": el_deg,
+        "x_angle": Xangle(az_deg, el_deg),
+        "y_angle": Yangle(az_deg, el_deg),
+        "visible": el_deg >= 0,
+    }
 
 
 class SatelliteTrackingWindow(tk.Toplevel):
@@ -118,8 +212,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         ttk.Button(self, text="Start Tracking", command=self.start_tracking_thread).pack(pady=8)
         ttk.Button(self, text="Stop Tracking / Stow", command=self.stop_tracking).pack(pady=5)
 
-        self.output_text = tk.Text(self, height=18, width=80)
-        self.output_text.pack(pady=10)
+        self.output_var = tk.StringVar(value="")
+        self.output_label = ttk.Label(self, textvariable=self.output_var, justify="left", anchor="nw")
+        self.output_label.pack(fill="both", expand=True, padx=10, pady=10)
 
     def load_tle(self):
         file_path = filedialog.askopenfilename(filetypes=[("TLE Files", "*.txt"), ("All Files", "*.*")])
@@ -242,35 +337,84 @@ class SatelliteTrackingWindow(tk.Toplevel):
         observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon)
         sat = self.satellites[sat_index]
         was_visible = False
+        trajectory = []
+        trajectory_start_monotonic = 0.0
+        trajectory_start_utc = None
+        next_rise_utc = get_next_rise_time(ts, observer, sat)
+        prepointed = False
 
         while self.running and sat_index == self.current_sat_index:
-            t = ts.now()
+            now_monotonic = time.monotonic()
+            now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
 
-            difference = sat - observer
-            topocentric = difference.at(t)
+            if (
+                not trajectory
+                or trajectory_start_utc is None
+                or now_monotonic - trajectory_start_monotonic >= TRAJECTORY_HORIZON_SEC - TRAJECTORY_REBUILD_MARGIN_SEC
+            ):
+                trajectory_start_monotonic = now_monotonic
+                trajectory_start_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+                trajectory = build_tracking_trajectory(
+                    ts,
+                    observer,
+                    sat,
+                    trajectory_start_utc,
+                    TRAJECTORY_HORIZON_SEC,
+                    TRAJECTORY_POINT_SPACING_SEC,
+                )
 
-            el, az, distance = topocentric.altaz()
+            sample = sample_tracking_trajectory(trajectory, now_monotonic - trajectory_start_monotonic)
+            if sample is None:
+                time.sleep(TRACK_COMMAND_INTERVAL_SEC)
+                continue
 
-            az_deg = az.degrees
-            el_deg = el.degrees
+            prepoint_status = "Tracking pass"
+            if next_rise_utc and not was_visible:
+                seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
+                if seconds_to_rise > 0:
+                    prepoint_status = f"Waiting for rise in {seconds_to_rise:.1f} s"
+                    if seconds_to_rise <= PREPOINT_LEAD_TIME_SEC:
+                        rise_sample = get_pointing_sample(ts, observer, sat, next_rise_utc)
+                        sample = {
+                            "az_deg": rise_sample["az_deg"],
+                            "el_deg": rise_sample["el_deg"],
+                            "x_angle": rise_sample["x_angle"],
+                            "y_angle": rise_sample["y_angle"],
+                            "visible": False,
+                        }
+                        prepointed = True
+                        prepoint_status = f"Prepointing rise in {seconds_to_rise:.1f} s"
 
-            x_angle = Xangle(az_deg, el_deg)
-            y_angle = Yangle(az_deg, el_deg)
+            az_deg = sample["az_deg"]
+            el_deg = sample["el_deg"]
+            x_angle = sample["x_angle"]
+            y_angle = sample["y_angle"]
 
-            self.output_text.delete("1.0", tk.END)
-            self.output_text.insert(tk.END, f"Satellite: {sat.name}\n")
-            self.output_text.insert(tk.END, f"AZ: {az_deg:.3f}\n")
-            self.output_text.insert(tk.END, f"EL: {el_deg:.3f}\n")
-            self.output_text.insert(tk.END, f"X Angle: {x_angle:.3f}\n")
-            self.output_text.insert(tk.END, f"Y Angle: {y_angle:.3f}\n")
-            self.output_text.update()
+            self.output_var.set(
+                "\n".join(
+                    [
+                        f"Satellite: {sat.name}",
+                        f"AZ: {az_deg:.3f}",
+                        f"EL: {el_deg:.3f}",
+                        f"X Angle: {x_angle:.3f}",
+                        f"Y Angle: {y_angle:.3f}",
+                        f"Cmd Interval: {TRACK_COMMAND_INTERVAL_SEC:.3f} s",
+                        f"Trajectory Horizon: {TRAJECTORY_HORIZON_SEC:.1f} s",
+                        prepoint_status,
+                    ]
+                )
+            )
 
-            if el_deg >= 0:
+            if sample["visible"]:
                 was_visible = True
+                prepointed = False
 
                 if self.control:
                     update_odrive_axes(x_angle, y_angle, self.control)
             else:
+                if prepointed and self.control:
+                    update_odrive_axes(x_angle, y_angle, self.control)
+
                 if was_visible:
                     if self.control:
                         try:
@@ -281,7 +425,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     self.running = False
                     break
 
-            time.sleep(0.5)
+            time.sleep(TRACK_COMMAND_INTERVAL_SEC)
 
     def apply_location(self):
         try:

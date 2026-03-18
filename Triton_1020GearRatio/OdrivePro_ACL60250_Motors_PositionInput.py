@@ -5,7 +5,7 @@ import odrive
 
 # ------------------ CONFIGURATION ------------------
 GEAR_RATIO = 1240.0
-POSITION_TOL = 0.05
+POSITION_TOL = 0.005
 VELOCITY_TOL = 0.001
 
 MAX_DEGREE = 90
@@ -251,6 +251,22 @@ def move_absolute(target_output_deg, axis="x"):
     wait_until_settled(target_motor_turns, axis=axis)
 
 
+def command_absolute(target_output_deg, axis="x"):
+    state = _get_state(axis)
+    output_sign = AXIS_CONFIG[axis]["output_sign"]
+
+    if target_output_deg > MAX_DEGREE:
+        target_output_deg = MAX_DEGREE
+    elif target_output_deg < MIN_DEGREE:
+        target_output_deg = MIN_DEGREE
+
+    target_output_turns = target_output_deg / 360.0
+    target_motor_turns = state["motor_home"] + output_sign * target_output_turns * GEAR_RATIO
+
+    state["odrive"].axis0.requested_state = 8
+    state["odrive"].axis0.controller.input_pos = target_motor_turns
+
+
 def move_relative(delta_deg, axis="x"):
     current_deg = get_current_position(axis=axis)
     move_absolute(current_deg + delta_deg, axis=axis)
@@ -305,6 +321,13 @@ def move_absolute_pair(x_deg=None, y_deg=None):
     if y_deg is not None:
         calls.append((move_absolute, {"target_output_deg": y_deg, "axis": "y"}))
     _run_parallel(calls)
+
+
+def command_absolute_pair(x_deg=None, y_deg=None):
+    if x_deg is not None:
+        command_absolute(x_deg, axis="x")
+    if y_deg is not None:
+        command_absolute(y_deg, axis="y")
 
 
 def move_relative_pair(x_delta=None, y_delta=None):
