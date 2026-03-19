@@ -3,6 +3,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
+from math import ceil
 from math import acos, atan, cos, pi, sin, sqrt
 from tkinter import filedialog, messagebox, ttk
 
@@ -367,13 +368,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.output_text.configure(yscrollcommand=output_scrollbar.set)
 
         self.error_fig = Figure(figsize=(7.8, 5.2), dpi=100)
-        self.error_ax = self.error_fig.add_subplot(111)
-        self.error_ax.set_title("Tracking Error")
-        self.error_ax.set_xlabel("Time (s)")
-        self.error_ax.set_ylabel("Deg")
-        self.x_error_line, = self.error_ax.plot([], [], label="X Error")
-        self.y_error_line, = self.error_ax.plot([], [], label="Y Error")
-        self.error_ax.legend()
+        self.error_ax_x = self.error_fig.add_subplot(211)
+        self.error_ax_y = self.error_fig.add_subplot(212, sharex=self.error_ax_x)
+        self.error_ax_x.set_title("Tracking Error")
+        self.error_ax_x.set_ylabel("X Error (deg)")
+        self.error_ax_y.set_xlabel("Time (s)")
+        self.error_ax_y.set_ylabel("Y Error (deg)")
+        self.x_error_line, = self.error_ax_x.plot([], [], label="X Error")
+        self.y_error_line, = self.error_ax_y.plot([], [], label="Y Error", color="tab:orange")
+        self.error_ax_x.legend(loc="upper right")
+        self.error_ax_y.legend(loc="upper right")
+        self.error_fig.tight_layout()
 
         self.error_canvas = FigureCanvasTkAgg(self.error_fig, master=self)
         self.error_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -384,8 +389,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_error_history.clear()
         self.x_error_line.set_data([], [])
         self.y_error_line.set_data([], [])
-        self.error_ax.relim()
-        self.error_ax.autoscale_view()
+        self.error_ax_x.relim()
+        self.error_ax_x.autoscale_view()
+        self.error_ax_y.relim()
+        self.error_ax_y.autoscale_view()
         self.error_canvas.draw_idle()
 
     def set_output_text(self, text):
@@ -400,9 +407,42 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_error_history.append(y_error)
         self.x_error_line.set_data(list(self.error_time), list(self.x_error_history))
         self.y_error_line.set_data(list(self.error_time), list(self.y_error_history))
-        self.error_ax.relim()
-        self.error_ax.autoscale_view()
+        self.error_ax_x.relim()
+        self.error_ax_x.autoscale_view()
+        self.error_ax_y.relim()
+        self.error_ax_y.autoscale_view()
         self.error_canvas.draw_idle()
+
+    def stream_tracking_command(self, previous_command, target_command, total_interval_sec):
+        if not self.control:
+            return target_command, 0.0
+
+        if previous_command is None:
+            update_odrive_axes(target_command[0], target_command[1], self.control)
+            return target_command, 0.0
+
+        dx = target_command[0] - previous_command[0]
+        dy = target_command[1] - previous_command[1]
+        max_delta = max(abs(dx), abs(dy))
+        if self.max_angle_step_deg <= 0:
+            steps = 1
+        else:
+            steps = max(1, int(ceil(max_delta / self.max_angle_step_deg)))
+
+        if steps == 1:
+            update_odrive_axes(target_command[0], target_command[1], self.control)
+            return target_command, 0.0
+
+        step_interval = total_interval_sec / steps
+        for step_index in range(1, steps + 1):
+            alpha = step_index / steps
+            x_cmd = previous_command[0] + dx * alpha
+            y_cmd = previous_command[1] + dy * alpha
+            update_odrive_axes(x_cmd, y_cmd, self.control)
+            if step_index < steps:
+                time.sleep(step_interval)
+
+        return target_command, total_interval_sec * (steps - 1) / steps
 
     def apply_tracking_settings(self):
         try:
@@ -562,6 +602,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         if self.control:
             try:
+                self.control.exit_tracking_mode_all()
+            except Exception:
+                pass
+            try:
                 self.control.move_absolute_pair(x_deg=0, y_deg=0)
             except Exception:
                 pass
@@ -572,6 +616,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         sat = self.satellites[sat_index]
         was_visible = False
         tracking_started = False
+        last_tracking_command = None
         trajectory = []
         trajectory_start_monotonic = 0.0
         trajectory_start_utc = None
@@ -579,115 +624,142 @@ class SatelliteTrackingWindow(tk.Toplevel):
         prepointed = False
         tracking_start_monotonic = time.monotonic()
 
-        while self.running and sat_index == self.current_sat_index:
-            now_monotonic = time.monotonic()
-            now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+        try:
+            while self.running and sat_index == self.current_sat_index:
+                now_monotonic = time.monotonic()
+                now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
 
-            if (
-                not trajectory
-                or trajectory_start_utc is None
-                or now_monotonic - trajectory_start_monotonic >= self.trajectory_horizon_sec - self.trajectory_rebuild_margin_sec
-            ):
-                trajectory_start_monotonic = now_monotonic
-                trajectory_start_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
-                trajectory = build_tracking_trajectory(
-                    ts,
-                    observer,
-                    sat,
-                    trajectory_start_utc,
-                    self.trajectory_horizon_sec,
-                    self.trajectory_point_spacing_sec,
-                    self.max_angle_step_deg,
-                    self.min_trajectory_spacing_sec,
-                )
+                if (
+                    not trajectory
+                    or trajectory_start_utc is None
+                    or now_monotonic - trajectory_start_monotonic >= self.trajectory_horizon_sec - self.trajectory_rebuild_margin_sec
+                ):
+                    trajectory_start_monotonic = now_monotonic
+                    trajectory_start_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+                    trajectory = build_tracking_trajectory(
+                        ts,
+                        observer,
+                        sat,
+                        trajectory_start_utc,
+                        self.trajectory_horizon_sec,
+                        self.trajectory_point_spacing_sec,
+                        self.max_angle_step_deg,
+                        self.min_trajectory_spacing_sec,
+                    )
 
-            sample = sample_tracking_trajectory(trajectory, now_monotonic - trajectory_start_monotonic)
-            if sample is None:
-                time.sleep(self.track_command_interval_sec)
-                continue
+                sample = sample_tracking_trajectory(trajectory, now_monotonic - trajectory_start_monotonic)
+                if sample is None:
+                    time.sleep(self.track_command_interval_sec)
+                    continue
 
-            prepoint_status = "Tracking pass"
-            rise_eta_text = "Rise ETA: -"
-            if next_rise_utc and not was_visible:
-                seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
-                if seconds_to_rise > 0:
-                    rise_eta_text = f"Rise ETA: {seconds_to_rise:.1f} s"
-                    prepoint_status = f"Waiting for rise in {seconds_to_rise:.1f} s"
-                    if seconds_to_rise <= self.prepoint_lead_time_sec:
-                        rise_sample = get_pointing_sample(ts, observer, sat, next_rise_utc)
-                        sample = {
-                            "az_deg": rise_sample["az_deg"],
-                            "el_deg": rise_sample["el_deg"],
-                            "x_angle": rise_sample["x_angle"],
-                            "y_angle": rise_sample["y_angle"],
-                            "visible": False,
-                        }
-                        prepointed = True
-                        prepoint_status = f"Prepointing rise in {seconds_to_rise:.1f} s"
+                prepoint_status = "Tracking pass"
+                rise_eta_text = "Rise ETA: -"
+                if next_rise_utc and not was_visible:
+                    seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
+                    if seconds_to_rise > 0:
+                        rise_eta_text = f"Rise ETA: {seconds_to_rise:.1f} s"
+                        prepoint_status = f"Waiting for rise in {seconds_to_rise:.1f} s"
+                        if seconds_to_rise <= self.prepoint_lead_time_sec:
+                            rise_sample = get_pointing_sample(ts, observer, sat, next_rise_utc)
+                            sample = {
+                                "az_deg": rise_sample["az_deg"],
+                                "el_deg": rise_sample["el_deg"],
+                                "x_angle": rise_sample["x_angle"],
+                                "y_angle": rise_sample["y_angle"],
+                                "visible": False,
+                            }
+                            prepointed = True
+                            prepoint_status = f"Prepointing rise in {seconds_to_rise:.1f} s"
 
-            az_deg = sample["az_deg"]
-            el_deg = sample["el_deg"]
-            x_angle, y_angle = clamp_tracking_angles(sample["x_angle"], sample["y_angle"])
-            x_actual = None
-            y_actual = None
-            x_error = 0.0
-            y_error = 0.0
-
-            if self.control:
-                try:
-                    x_actual = self.control.get_spi_position("x")
-                    y_actual = self.control.get_spi_position("y")
-                    x_error = x_angle - x_actual
-                    y_error = y_angle - y_actual
-                except Exception:
-                    x_actual = None
-                    y_actual = None
-
-            self.set_output_text(
-                "\n".join(
-                    [
-                        f"Satellite: {sat.name}",
-                        f"AZ: {az_deg:.3f}",
-                        f"EL: {el_deg:.3f}",
-                        f"X Angle: {x_angle:.3f}",
-                        f"Y Angle: {y_angle:.3f}",
-                        rise_eta_text,
-                        f"X Actual: {x_actual:.3f}" if x_actual is not None else "X Actual: -",
-                        f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
-                        f"X Error: {x_error:.3f}",
-                        f"Y Error: {y_error:.3f}",
-                        prepoint_status,
-                    ]
-                )
-            )
-
-            if sample["visible"]:
-                was_visible = True
-                prepointed = False
-
-                if self.control and tracking_started:
-                    self.update_error_plot(now_monotonic - tracking_start_monotonic, x_error, y_error)
+                az_deg = sample["az_deg"]
+                el_deg = sample["el_deg"]
+                x_angle, y_angle = clamp_tracking_angles(sample["x_angle"], sample["y_angle"])
+                x_actual = None
+                y_actual = None
+                x_error = 0.0
+                y_error = 0.0
 
                 if self.control:
-                    update_odrive_axes(x_angle, y_angle, self.control)
-                tracking_started = True
-            else:
-                if prepointed and self.control:
-                    update_odrive_axes(x_angle, y_angle, self.control)
+                    try:
+                        x_actual = self.control.get_spi_position("x")
+                        y_actual = self.control.get_spi_position("y")
+                        x_error = x_angle - x_actual
+                        y_error = y_angle - y_actual
+                    except Exception:
+                        x_actual = None
+                        y_actual = None
 
-                if was_visible:
-                    if self.control:
+                self.set_output_text(
+                    "\n".join(
+                        [
+                            f"Satellite: {sat.name}",
+                            f"AZ: {az_deg:.3f}",
+                            f"EL: {el_deg:.3f}",
+                            f"X Angle: {x_angle:.3f}",
+                            f"Y Angle: {y_angle:.3f}",
+                            rise_eta_text,
+                            f"X Actual: {x_actual:.3f}" if x_actual is not None else "X Actual: -",
+                            f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
+                            f"X Error: {x_error:.3f}",
+                            f"Y Error: {y_error:.3f}",
+                            prepoint_status,
+                        ]
+                    )
+                )
+
+                if sample["visible"]:
+                    was_visible = True
+                    prepointed = False
+
+                    if self.control and not tracking_started:
                         try:
-                            self.control.move_absolute_pair(x_deg=0, y_deg=0)
+                            filter_bandwidth = max(1.0, 1.0 / self.track_command_interval_sec)
+                            self.control.enter_tracking_mode_all(input_filter_bandwidth=filter_bandwidth)
                         except Exception:
                             pass
 
-                    self.running = False
-                    break
+                    if self.control and tracking_started:
+                        self.update_error_plot(now_monotonic - tracking_start_monotonic, x_error, y_error)
 
-                tracking_started = False
+                    consumed_sleep = 0.0
+                    if self.control:
+                        last_tracking_command, consumed_sleep = self.stream_tracking_command(
+                            last_tracking_command,
+                            (x_angle, y_angle),
+                            self.track_command_interval_sec,
+                        )
+                    tracking_started = True
+                else:
+                    if prepointed and self.control:
+                        update_odrive_axes(x_angle, y_angle, self.control)
 
-            time.sleep(self.track_command_interval_sec)
+                    if was_visible:
+                        if self.control:
+                            try:
+                                self.control.exit_tracking_mode_all()
+                            except Exception:
+                                pass
+                            try:
+                                self.control.move_absolute_pair(x_deg=0, y_deg=0)
+                            except Exception:
+                                pass
+
+                        self.running = False
+                        break
+
+                    tracking_started = False
+                    last_tracking_command = None
+                    consumed_sleep = 0.0
+
+                remaining_sleep = self.track_command_interval_sec - consumed_sleep
+                if remaining_sleep > 0:
+                    time.sleep(remaining_sleep)
+        finally:
+            if self.control:
+                try:
+                    self.control.exit_tracking_mode_all()
+                except Exception:
+                    pass
 
     def apply_location(self):
         try:

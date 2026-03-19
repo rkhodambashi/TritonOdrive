@@ -30,16 +30,18 @@ AXIS_CONFIG = {
     "x": {
         "serial_number": "3665337E3432",
         "spi_home_raw": X_SPI_HOME_RAW,
-        "output_sign": -1.0,
-        "spi_sign": 1.0,
+        "home_sign": -1.0,
+        "output_sign": 1.0,
+        "spi_sign": -1.0,
         "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
         "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
     "y": {
         "serial_number": "367F337A3432",
         "spi_home_raw": Y_SPI_HOME_RAW,
-        "output_sign": -1.0,
-        "spi_sign": 1.0,
+        "home_sign": -1.0,
+        "output_sign": 1.0,
+        "spi_sign": -1.0,
         "spinout_mechanical_power_threshold": DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD,
         "spinout_electrical_power_threshold": DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD,
     },
@@ -51,6 +53,10 @@ AXIS_STATE = {
         "motor_home": None,
         "spi_home_offset": None,
         "startup_motor_pos": None,
+        "tracking_prev_input_mode": None,
+        "tracking_prev_control_mode": None,
+        "tracking_prev_input_filter_bandwidth": None,
+        "tracking_mode_active": False,
     }
     for axis in AXIS_CONFIG
 }
@@ -160,6 +166,7 @@ def initialize(odrive_instance, axis="x"):
     state = AXIS_STATE[axis]
     spi_home_raw = AXIS_CONFIG[axis]["spi_home_raw"]
     output_sign = AXIS_CONFIG[axis]["output_sign"]
+    home_sign = AXIS_CONFIG[axis]["home_sign"]
     spinout_mech_threshold = AXIS_CONFIG[axis]["spinout_mechanical_power_threshold"]
     spinout_elec_threshold = AXIS_CONFIG[axis]["spinout_electrical_power_threshold"]
 
@@ -183,7 +190,7 @@ def initialize(odrive_instance, axis="x"):
     state["startup_motor_pos"] = odrive_instance.axis0.pos_vel_mapper.pos_rel
 
     current_motor_pos = state["startup_motor_pos"]
-    motor_home = current_motor_pos - output_sign * wrapped_raw_delta(odrive_instance.spi_encoder0.raw, spi_home_raw) * GEAR_RATIO
+    motor_home = current_motor_pos - home_sign * wrapped_raw_delta(odrive_instance.spi_encoder0.raw, spi_home_raw) * GEAR_RATIO
 
     max_motor_turns = state["startup_motor_pos"] + MAX_DEGREE / 360.0 * GEAR_RATIO
     min_motor_turns = state["startup_motor_pos"] + MIN_DEGREE / 360.0 * GEAR_RATIO
@@ -303,6 +310,46 @@ def set_traj_params(vel, acc, dec, axis="x"):
     state["odrive"].axis0.trap_traj.config.decel_limit = dec
 
 
+def enter_tracking_mode(axis="x", input_filter_bandwidth=None):
+    state = _get_state(axis)
+    if state["tracking_mode_active"]:
+        return
+
+    axis0 = state["odrive"].axis0
+    current_motor_pos = axis0.pos_vel_mapper.pos_rel
+    state["tracking_prev_control_mode"] = axis0.controller.config.control_mode
+    state["tracking_prev_input_mode"] = axis0.controller.config.input_mode
+    state["tracking_prev_input_filter_bandwidth"] = axis0.controller.config.input_filter_bandwidth
+    axis0.controller.config.control_mode = 3
+    axis0.controller.config.input_mode = 3
+    if input_filter_bandwidth is not None:
+        axis0.controller.config.input_filter_bandwidth = input_filter_bandwidth
+    axis0.controller.input_pos = current_motor_pos
+    axis0.requested_state = 8
+    state["tracking_mode_active"] = True
+
+
+def exit_tracking_mode(axis="x"):
+    state = _get_state(axis)
+    if not state["tracking_mode_active"]:
+        return
+
+    axis0 = state["odrive"].axis0
+    current_motor_pos = axis0.pos_vel_mapper.pos_rel
+    if state["tracking_prev_control_mode"] is not None:
+        axis0.controller.config.control_mode = state["tracking_prev_control_mode"]
+    if state["tracking_prev_input_mode"] is not None:
+        axis0.controller.config.input_mode = state["tracking_prev_input_mode"]
+    if state["tracking_prev_input_filter_bandwidth"] is not None:
+        axis0.controller.config.input_filter_bandwidth = state["tracking_prev_input_filter_bandwidth"]
+    axis0.controller.input_pos = current_motor_pos
+    axis0.requested_state = 8
+    state["tracking_prev_control_mode"] = None
+    state["tracking_prev_input_mode"] = None
+    state["tracking_prev_input_filter_bandwidth"] = None
+    state["tracking_mode_active"] = False
+
+
 def _run_parallel(calls):
     threads = []
     for func, kwargs in calls:
@@ -351,6 +398,16 @@ def set_gains_all(pos_gain, vel_gain, vel_i):
 def set_traj_params_all(vel, acc, dec):
     for axis in AXIS_CONFIG:
         set_traj_params(vel, acc, dec, axis=axis)
+
+
+def enter_tracking_mode_all(input_filter_bandwidth=None):
+    for axis in AXIS_CONFIG:
+        enter_tracking_mode(axis=axis, input_filter_bandwidth=input_filter_bandwidth)
+
+
+def exit_tracking_mode_all():
+    for axis in AXIS_CONFIG:
+        exit_tracking_mode(axis=axis)
 
 
 def disarm_all():
