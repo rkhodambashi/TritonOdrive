@@ -1,10 +1,11 @@
+import csv
 import datetime
 import threading
 import time
 import tkinter as tk
 from collections import deque
-from math import ceil
 from math import acos, atan, cos, pi, sin, sqrt
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
@@ -22,6 +23,12 @@ TRAJECTORY_REBUILD_MARGIN_SEC = 0.25
 PREPOINT_LEAD_TIME_SEC = 30.0
 MAX_ANGLE_STEP_DEG = 0.05
 MIN_TRAJECTORY_SPACING_SEC = 0.01
+TRACK_FEEDFORWARD_LEAD_SEC = 0.05
+TRACK_CAPTURE_ERROR_DEG = 0.5
+TRACK_FILTER_BANDWIDTH_HZ = 20.0
+TRACK_USE_FILTER = False
+TRACK_USE_LEAD = False
+TRACK_USE_PASSTHROUGH = True
 
 
 def Kvector(AZ, EL):
@@ -84,11 +91,51 @@ def update_odrive_axes(x_angle_deg, y_angle_deg, control):
         print(f"ODrive move error: {e}")
 
 
+def update_odrive_axes_with_velocity(x_angle_deg, y_angle_deg, x_vel_deg_s, y_vel_deg_s, control):
+    x_angle_deg = max(min(x_angle_deg, 90), -90)
+    y_angle_deg = max(min(y_angle_deg, 90), -90)
+    try:
+        control.command_absolute_pair_with_velocity(
+            x_deg=x_angle_deg,
+            y_deg=y_angle_deg,
+            x_vel_deg_s=x_vel_deg_s,
+            y_vel_deg_s=y_vel_deg_s,
+        )
+    except Exception as e:
+        print(f"ODrive move error: {e}")
+
+
 def clamp_tracking_angles(x_angle_deg, y_angle_deg):
     return (
         max(min(x_angle_deg, 90), -90),
         max(min(y_angle_deg, 90), -90),
     )
+
+
+def limit_command_step(previous_command, target_command, max_angle_step_deg):
+    if previous_command is None or max_angle_step_deg <= 0:
+        return target_command
+
+    dx = target_command[0] - previous_command[0]
+    dy = target_command[1] - previous_command[1]
+    max_delta = max(abs(dx), abs(dy))
+    if max_delta <= max_angle_step_deg:
+        return target_command
+
+    scale = max_angle_step_deg / max_delta
+    return (
+        previous_command[0] + dx * scale,
+        previous_command[1] + dy * scale,
+    )
+
+
+def command_step_exceeds(previous_command, target_command, max_angle_step_deg):
+    if previous_command is None or max_angle_step_deg <= 0:
+        return False
+    return max(
+        abs(target_command[0] - previous_command[0]),
+        abs(target_command[1] - previous_command[1]),
+    ) > max_angle_step_deg
 
 
 def build_pointing_sample(ts, observer, sat, sample_time_utc, offset_sec):
@@ -207,6 +254,162 @@ def sample_tracking_trajectory(points, elapsed_sec):
     return points[-1]
 
 
+def sample_tracking_state(points, elapsed_sec, derivative_dt_sec):
+    current = sample_tracking_trajectory(points, elapsed_sec)
+    if current is None:
+        return None
+
+    if not points:
+        current["x_vel"] = 0.0
+        current["y_vel"] = 0.0
+        current["x_acc"] = 0.0
+        current["y_acc"] = 0.0
+        return current
+
+    max_offset = points[-1]["offset_sec"]
+    dt = max(1e-4, min(derivative_dt_sec, max_offset if max_offset > 0 else derivative_dt_sec))
+    prev_t = max(0.0, elapsed_sec - dt)
+    next_t = min(max_offset, elapsed_sec + dt)
+    actual_dt = max(1e-4, next_t - prev_t)
+
+    prev_sample = sample_tracking_trajectory(points, prev_t)
+    next_sample = sample_tracking_trajectory(points, next_t)
+
+    x_vel = (next_sample["x_angle"] - prev_sample["x_angle"]) / actual_dt
+    y_vel = (next_sample["y_angle"] - prev_sample["y_angle"]) / actual_dt
+
+    center_dt = max(1e-4, actual_dt / 2.0)
+    x_acc = (next_sample["x_angle"] - 2.0 * current["x_angle"] + prev_sample["x_angle"]) / (center_dt * center_dt)
+    y_acc = (next_sample["y_angle"] - 2.0 * current["y_angle"] + prev_sample["y_angle"]) / (center_dt * center_dt)
+
+    current["x_vel"] = x_vel
+    current["y_vel"] = y_vel
+    current["x_acc"] = x_acc
+    current["y_acc"] = y_acc
+    return current
+
+
+def sample_tracking_state_continuous(
+    ts,
+    observer,
+    sat,
+    trajectory_start_utc,
+    trajectory_origin_elapsed_sec,
+    trajectory_end_elapsed_sec,
+    absolute_elapsed_sec,
+    derivative_dt_sec,
+):
+    clamped_absolute_elapsed_sec = min(max(trajectory_origin_elapsed_sec, absolute_elapsed_sec), trajectory_end_elapsed_sec)
+    local_elapsed_sec = clamped_absolute_elapsed_sec - trajectory_origin_elapsed_sec
+    sample_time_utc = trajectory_start_utc + datetime.timedelta(seconds=local_elapsed_sec)
+    current = build_pointing_sample(ts, observer, sat, sample_time_utc, local_elapsed_sec)
+
+    dt = max(1e-4, derivative_dt_sec)
+    prev_elapsed_sec = max(trajectory_origin_elapsed_sec, clamped_absolute_elapsed_sec - dt)
+    next_elapsed_sec = min(trajectory_end_elapsed_sec, clamped_absolute_elapsed_sec + dt)
+    actual_dt = max(1e-4, next_elapsed_sec - prev_elapsed_sec)
+
+    prev_local_elapsed_sec = prev_elapsed_sec - trajectory_origin_elapsed_sec
+    next_local_elapsed_sec = next_elapsed_sec - trajectory_origin_elapsed_sec
+    prev_sample = build_pointing_sample(
+        ts,
+        observer,
+        sat,
+        trajectory_start_utc + datetime.timedelta(seconds=prev_local_elapsed_sec),
+        prev_local_elapsed_sec,
+    )
+    next_sample = build_pointing_sample(
+        ts,
+        observer,
+        sat,
+        trajectory_start_utc + datetime.timedelta(seconds=next_local_elapsed_sec),
+        next_local_elapsed_sec,
+    )
+
+    current["x_vel"] = (next_sample["x_angle"] - prev_sample["x_angle"]) / actual_dt
+    current["y_vel"] = (next_sample["y_angle"] - prev_sample["y_angle"]) / actual_dt
+
+    center_dt = max(1e-4, actual_dt / 2.0)
+    current["x_acc"] = (next_sample["x_angle"] - 2.0 * current["x_angle"] + prev_sample["x_angle"]) / (center_dt * center_dt)
+    current["y_acc"] = (next_sample["y_angle"] - 2.0 * current["y_angle"] + prev_sample["y_angle"]) / (center_dt * center_dt)
+    return current
+
+
+def sample_limited_tracking_target_continuous(
+    ts,
+    observer,
+    sat,
+    trajectory_start_utc,
+    trajectory_origin_elapsed_sec,
+    trajectory_end_elapsed_sec,
+    previous_target_elapsed_sec,
+    target_elapsed_sec,
+    derivative_dt_sec,
+    previous_command=None,
+    max_angle_step_deg=0.0,
+):
+    target_state = sample_tracking_state_continuous(
+        ts,
+        observer,
+        sat,
+        trajectory_start_utc,
+        trajectory_origin_elapsed_sec,
+        trajectory_end_elapsed_sec,
+        target_elapsed_sec,
+        derivative_dt_sec,
+    )
+    if target_state is None:
+        return None, target_elapsed_sec
+
+    search_start_elapsed_sec = max(
+        trajectory_origin_elapsed_sec,
+        previous_target_elapsed_sec if previous_target_elapsed_sec is not None else trajectory_origin_elapsed_sec,
+    )
+
+    if previous_command is None or max_angle_step_deg <= 0 or target_elapsed_sec <= search_start_elapsed_sec:
+        return target_state, target_elapsed_sec
+
+    target_command = (target_state["x_angle"], target_state["y_angle"])
+    if not command_step_exceeds(previous_command, target_command, max_angle_step_deg):
+        return target_state, target_elapsed_sec
+
+    low_elapsed = search_start_elapsed_sec
+    high_elapsed = target_elapsed_sec
+    best_elapsed = search_start_elapsed_sec
+    best_state = sample_tracking_state_continuous(
+        ts,
+        observer,
+        sat,
+        trajectory_start_utc,
+        trajectory_origin_elapsed_sec,
+        trajectory_end_elapsed_sec,
+        search_start_elapsed_sec,
+        derivative_dt_sec,
+    )
+
+    for _ in range(24):
+        mid_elapsed = (low_elapsed + high_elapsed) / 2.0
+        mid_state = sample_tracking_state_continuous(
+            ts,
+            observer,
+            sat,
+            trajectory_start_utc,
+            trajectory_origin_elapsed_sec,
+            trajectory_end_elapsed_sec,
+            mid_elapsed,
+            derivative_dt_sec,
+        )
+        mid_command = (mid_state["x_angle"], mid_state["y_angle"])
+        if command_step_exceeds(previous_command, mid_command, max_angle_step_deg):
+            high_elapsed = mid_elapsed
+        else:
+            low_elapsed = mid_elapsed
+            best_elapsed = mid_elapsed
+            best_state = mid_state
+
+    return best_state, best_elapsed
+
+
 def get_next_rise_time(ts, observer, sat, search_hours=24):
     t0 = ts.now()
     t1 = ts.from_datetime(datetime.datetime.utcnow().replace(tzinfo=utc) + datetime.timedelta(hours=search_hours))
@@ -246,7 +449,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         super().__init__(parent)
 
         self.title("Satellite Tracking")
-        self.geometry("820x840")
+        self.geometry("1080x980")
 
         self.odrvs = odrvs or {}
         self.control = control
@@ -257,6 +460,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.trajectory_horizon_sec = TRAJECTORY_HORIZON_SEC
         self.trajectory_point_spacing_sec = TRAJECTORY_POINT_SPACING_SEC
         self.max_angle_step_deg = MAX_ANGLE_STEP_DEG
+        self.feedforward_lead_sec = TRACK_FEEDFORWARD_LEAD_SEC
+        self.track_filter_bandwidth_hz = TRACK_FILTER_BANDWIDTH_HZ
+        self.track_capture_error_deg = TRACK_CAPTURE_ERROR_DEG
         self.trajectory_rebuild_margin_sec = TRAJECTORY_REBUILD_MARGIN_SEC
         self.prepoint_lead_time_sec = PREPOINT_LEAD_TIME_SEC
         self.min_trajectory_spacing_sec = MIN_TRAJECTORY_SPACING_SEC
@@ -337,29 +543,49 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.max_angle_step_entry.grid(row=3, column=1, padx=5, pady=2)
         self.max_angle_step_entry.insert(0, f"{self.max_angle_step_deg:g}")
 
-        ttk.Label(settings_frame, text="Rebuild Margin").grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        self.rebuild_margin_entry = ttk.Entry(settings_frame, width=10)
-        self.rebuild_margin_entry.grid(row=4, column=1, padx=5, pady=2)
-        self.rebuild_margin_entry.insert(0, f"{self.trajectory_rebuild_margin_sec:g}")
-
-        ttk.Label(settings_frame, text="Prepoint Lead").grid(row=5, column=0, sticky="w", padx=5, pady=2)
-        self.prepoint_lead_entry = ttk.Entry(settings_frame, width=10)
-        self.prepoint_lead_entry.grid(row=5, column=1, padx=5, pady=2)
-        self.prepoint_lead_entry.insert(0, f"{self.prepoint_lead_time_sec:g}")
-
-        ttk.Label(settings_frame, text="Min Spacing").grid(row=6, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(settings_frame, text="Min Spacing").grid(row=4, column=0, sticky="w", padx=5, pady=2)
         self.min_spacing_entry = ttk.Entry(settings_frame, width=10)
-        self.min_spacing_entry.grid(row=6, column=1, padx=5, pady=2)
+        self.min_spacing_entry.grid(row=4, column=1, padx=5, pady=2)
         self.min_spacing_entry.insert(0, f"{self.min_trajectory_spacing_sec:g}")
 
+        ttk.Label(settings_frame, text="Lead (s)").grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        self.feedforward_lead_entry = ttk.Entry(settings_frame, width=10)
+        self.feedforward_lead_entry.grid(row=5, column=1, padx=5, pady=2)
+        self.feedforward_lead_entry.insert(0, f"{self.feedforward_lead_sec:g}")
+
+        ttk.Label(settings_frame, text="Filter BW").grid(row=0, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.filter_bandwidth_entry = ttk.Entry(settings_frame, width=10)
+        self.filter_bandwidth_entry.grid(row=0, column=3, padx=5, pady=2)
+        self.filter_bandwidth_entry.insert(0, f"{self.track_filter_bandwidth_hz:g}")
+
+        ttk.Label(settings_frame, text="Capture Err").grid(row=1, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.capture_error_entry = ttk.Entry(settings_frame, width=10)
+        self.capture_error_entry.grid(row=1, column=3, padx=5, pady=2)
+        self.capture_error_entry.insert(0, f"{self.track_capture_error_deg:g}")
+
+        ttk.Label(settings_frame, text="Rebuild Margin").grid(row=2, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.rebuild_margin_entry = ttk.Entry(settings_frame, width=10)
+        self.rebuild_margin_entry.grid(row=2, column=3, padx=5, pady=2)
+        self.rebuild_margin_entry.insert(0, f"{self.trajectory_rebuild_margin_sec:g}")
+
+        ttk.Label(settings_frame, text="Prepoint Lead").grid(row=3, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.prepoint_lead_entry = ttk.Entry(settings_frame, width=10)
+        self.prepoint_lead_entry.grid(row=3, column=3, padx=5, pady=2)
+        self.prepoint_lead_entry.insert(0, f"{self.prepoint_lead_time_sec:g}")
+
         ttk.Button(settings_frame, text="Apply", command=self.apply_tracking_settings).grid(
-            row=7, column=0, columnspan=2, pady=6
+            row=6, column=0, columnspan=4, pady=6
         )
 
-        output_frame = ttk.Frame(self)
-        output_frame.pack(fill="x", padx=10, pady=10)
+        settings_frame.columnconfigure(0, weight=0)
+        settings_frame.columnconfigure(1, weight=0)
+        settings_frame.columnconfigure(2, weight=0)
+        settings_frame.columnconfigure(3, weight=0)
 
-        self.output_text = tk.Text(output_frame, height=14, wrap="none")
+        output_frame = ttk.Frame(self)
+        output_frame.pack(fill="x", padx=10, pady=(6, 10))
+
+        self.output_text = tk.Text(output_frame, height=8, width=100, wrap="none", font=("Consolas", 10))
         self.output_text.pack(side="left", fill="x", expand=True)
         self.output_text.configure(state="disabled")
 
@@ -370,12 +596,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.error_fig = Figure(figsize=(7.8, 5.2), dpi=100)
         self.error_ax_x = self.error_fig.add_subplot(211)
         self.error_ax_y = self.error_fig.add_subplot(212, sharex=self.error_ax_x)
-        self.error_ax_x.set_title("Tracking Error")
-        self.error_ax_x.set_ylabel("X Error (deg)")
+        self.error_ax_x.set_title("Trajectory Error")
+        self.error_ax_x.set_ylabel("X Traj Error (deg)")
         self.error_ax_y.set_xlabel("Time (s)")
-        self.error_ax_y.set_ylabel("Y Error (deg)")
-        self.x_error_line, = self.error_ax_x.plot([], [], label="X Error")
-        self.y_error_line, = self.error_ax_y.plot([], [], label="Y Error", color="tab:orange")
+        self.error_ax_y.set_ylabel("Y Traj Error (deg)")
+        self.x_error_line, = self.error_ax_x.plot([], [], label="X Traj Error")
+        self.y_error_line, = self.error_ax_y.plot([], [], label="Y Traj Error", color="tab:orange")
         self.error_ax_x.legend(loc="upper right")
         self.error_ax_y.legend(loc="upper right")
         self.error_fig.tight_layout()
@@ -401,6 +627,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.output_text.insert("1.0", text)
         self.output_text.configure(state="disabled")
 
+    def format_output_columns(self, lines, columns=2, gutter=4):
+        if not lines:
+            return ""
+
+        row_count = (len(lines) + columns - 1) // columns
+        padded = list(lines) + [""] * (row_count * columns - len(lines))
+        column_widths = []
+        for col in range(columns):
+            column_items = padded[col * row_count : (col + 1) * row_count]
+            column_widths.append(max((len(item) for item in column_items), default=0))
+
+        rows = []
+        for row in range(row_count):
+            row_parts = []
+            for col in range(columns):
+                item = padded[col * row_count + row]
+                if col < columns - 1:
+                    row_parts.append(item.ljust(column_widths[col] + gutter))
+                else:
+                    row_parts.append(item)
+            rows.append("".join(row_parts).rstrip())
+        return "\n".join(rows)
+
     def update_error_plot(self, elapsed_sec, x_error, y_error):
         self.error_time.append(elapsed_sec)
         self.x_error_history.append(x_error)
@@ -413,55 +662,30 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.error_ax_y.autoscale_view()
         self.error_canvas.draw_idle()
 
-    def stream_tracking_command(self, previous_command, target_command, total_interval_sec):
-        if not self.control:
-            return target_command, 0.0
-
-        if previous_command is None:
-            update_odrive_axes(target_command[0], target_command[1], self.control)
-            return target_command, 0.0
-
-        dx = target_command[0] - previous_command[0]
-        dy = target_command[1] - previous_command[1]
-        max_delta = max(abs(dx), abs(dy))
-        if self.max_angle_step_deg <= 0:
-            steps = 1
-        else:
-            steps = max(1, int(ceil(max_delta / self.max_angle_step_deg)))
-
-        if steps == 1:
-            update_odrive_axes(target_command[0], target_command[1], self.control)
-            return target_command, 0.0
-
-        step_interval = total_interval_sec / steps
-        for step_index in range(1, steps + 1):
-            alpha = step_index / steps
-            x_cmd = previous_command[0] + dx * alpha
-            y_cmd = previous_command[1] + dy * alpha
-            update_odrive_axes(x_cmd, y_cmd, self.control)
-            if step_index < steps:
-                time.sleep(step_interval)
-
-        return target_command, total_interval_sec * (steps - 1) / steps
-
     def apply_tracking_settings(self):
         try:
             cmd_interval = float(self.cmd_interval_entry.get())
             horizon = float(self.horizon_entry.get())
             point_spacing = float(self.point_spacing_entry.get())
             max_angle_step = float(self.max_angle_step_entry.get())
+            min_spacing = float(self.min_spacing_entry.get())
+            feedforward_lead = float(self.feedforward_lead_entry.get())
+            filter_bandwidth = float(self.filter_bandwidth_entry.get())
+            capture_error = float(self.capture_error_entry.get())
             rebuild_margin = float(self.rebuild_margin_entry.get())
             prepoint_lead = float(self.prepoint_lead_entry.get())
-            min_spacing = float(self.min_spacing_entry.get())
 
             if (
                 cmd_interval <= 0
                 or horizon <= 0
                 or point_spacing <= 0
                 or max_angle_step <= 0
+                or min_spacing <= 0
+                or feedforward_lead < 0
+                or filter_bandwidth <= 0
+                or capture_error <= 0
                 or rebuild_margin <= 0
                 or prepoint_lead <= 0
-                or min_spacing <= 0
             ):
                 raise ValueError
             if point_spacing > horizon:
@@ -475,14 +699,18 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.trajectory_horizon_sec = horizon
             self.trajectory_point_spacing_sec = point_spacing
             self.max_angle_step_deg = max_angle_step
+            self.min_trajectory_spacing_sec = min_spacing
+            self.feedforward_lead_sec = feedforward_lead
+            self.track_filter_bandwidth_hz = filter_bandwidth
+            self.track_capture_error_deg = capture_error
             self.trajectory_rebuild_margin_sec = rebuild_margin
             self.prepoint_lead_time_sec = prepoint_lead
-            self.min_trajectory_spacing_sec = min_spacing
         except Exception:
             messagebox.showerror(
                 "Error",
                 (
                     "Tracking settings must be positive numbers.\n"
+                    "Lead can be zero or positive.\n"
                     "Point spacing cannot exceed horizon.\n"
                     "Rebuild margin must be smaller than horizon.\n"
                     "Min spacing cannot exceed point spacing."
@@ -600,6 +828,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.running = False
         self.current_sat_index = None
 
+        tracking_thread = self.tracking_thread
+        if tracking_thread and tracking_thread.is_alive() and tracking_thread is not threading.current_thread():
+            tracking_thread.join(timeout=max(0.2, self.track_command_interval_sec * 2.0))
+
         if self.control:
             try:
                 self.control.exit_tracking_mode_all()
@@ -609,16 +841,74 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.control.move_absolute_pair(x_deg=0, y_deg=0)
             except Exception:
                 pass
+        self.tracking_thread = None
 
     def track_satellite_loop(self, sat_index):
         ts = load.timescale()
         observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon)
         sat = self.satellites[sat_index]
+        log_dir = Path(__file__).resolve().parent / "tracking_logs"
+        log_dir.mkdir(exist_ok=True)
+        safe_sat_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in sat.name).strip("_") or "satellite"
+        log_path = log_dir / f"{safe_sat_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        log_file = open(log_path, "w", newline="", encoding="utf-8")
+        log_writer = csv.writer(log_file)
+        log_writer.writerow(
+            [
+                "utc_time",
+                "elapsed_sec",
+                "trajectory_elapsed_sec",
+                "sample_visible",
+                "tracking_started",
+                "rebuilt_trajectory",
+                "target_elapsed_sec",
+                "ideal_target_elapsed_sec",
+                "az_deg",
+                "el_deg",
+                "raw_x_angle_deg",
+                "raw_y_angle_deg",
+                "cmd_x_angle_deg",
+                "cmd_y_angle_deg",
+                "raw_dx_deg",
+                "raw_dy_deg",
+                "cmd_dx_deg",
+                "cmd_dy_deg",
+                "x_vel_deg_per_s",
+                "y_vel_deg_per_s",
+                "x_acc_deg_per_s2",
+                "y_acc_deg_per_s2",
+                "cmd_x_vel_ff_deg_per_s",
+                "cmd_y_vel_ff_deg_per_s",
+                "x_control_mode",
+                "x_input_mode",
+                "y_control_mode",
+                "y_input_mode",
+                "x_controller_vel_limit",
+                "y_controller_vel_limit",
+                "x_traj_vel_limit",
+                "x_traj_accel_limit",
+                "x_traj_decel_limit",
+                "y_traj_vel_limit",
+                "y_traj_accel_limit",
+                "y_traj_decel_limit",
+                "x_actual_deg",
+                "y_actual_deg",
+                "x_cmd_error_deg",
+                "y_cmd_error_deg",
+                "x_traj_error_deg",
+                "y_traj_error_deg",
+                "capture_error_deg",
+                "status",
+            ]
+        )
         was_visible = False
         tracking_started = False
         last_tracking_command = None
+        last_display_target_elapsed = None
+        last_raw_angles = None
+        last_display_command = None
         trajectory = []
-        trajectory_start_monotonic = 0.0
+        trajectory_origin_elapsed_sec = 0.0
         trajectory_start_utc = None
         next_rise_utc = get_next_rise_time(ts, observer, sat)
         prepointed = False
@@ -628,14 +918,21 @@ class SatelliteTrackingWindow(tk.Toplevel):
             while self.running and sat_index == self.current_sat_index:
                 now_monotonic = time.monotonic()
                 now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+                continuous_elapsed_sec = now_monotonic - tracking_start_monotonic
+                rebuilt_trajectory = False
 
                 if (
                     not trajectory
                     or trajectory_start_utc is None
-                    or now_monotonic - trajectory_start_monotonic >= self.trajectory_horizon_sec - self.trajectory_rebuild_margin_sec
+                    or continuous_elapsed_sec - trajectory_origin_elapsed_sec >= self.trajectory_horizon_sec - self.trajectory_rebuild_margin_sec
                 ):
-                    trajectory_start_monotonic = now_monotonic
-                    trajectory_start_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+                    trajectory_origin_elapsed_sec = min(
+                        continuous_elapsed_sec,
+                        last_display_target_elapsed if last_display_target_elapsed is not None else continuous_elapsed_sec,
+                    )
+                    trajectory_start_utc = now_utc - datetime.timedelta(
+                        seconds=continuous_elapsed_sec - trajectory_origin_elapsed_sec
+                    )
                     trajectory = build_tracking_trajectory(
                         ts,
                         observer,
@@ -646,8 +943,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         self.max_angle_step_deg,
                         self.min_trajectory_spacing_sec,
                     )
+                    rebuilt_trajectory = True
 
-                sample = sample_tracking_trajectory(trajectory, now_monotonic - trajectory_start_monotonic)
+                derivative_dt = min(self.track_command_interval_sec, self.trajectory_point_spacing_sec)
+                elapsed_sec = continuous_elapsed_sec - trajectory_origin_elapsed_sec
+                sample = sample_tracking_state(trajectory, elapsed_sec, derivative_dt)
                 if sample is None:
                     time.sleep(self.track_command_interval_sec)
                     continue
@@ -673,65 +973,284 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 az_deg = sample["az_deg"]
                 el_deg = sample["el_deg"]
-                x_angle, y_angle = clamp_tracking_angles(sample["x_angle"], sample["y_angle"])
+                raw_x_angle = sample["x_angle"]
+                raw_y_angle = sample["y_angle"]
+                x_angle = raw_x_angle
+                y_angle = raw_y_angle
+                x_vel = sample.get("x_vel", 0.0)
+                y_vel = sample.get("y_vel", 0.0)
+                x_acc = sample.get("x_acc", 0.0)
+                y_acc = sample.get("y_acc", 0.0)
+
+                command_sample = sample
+                target_elapsed_sec = continuous_elapsed_sec
+                ideal_target_elapsed_sec = continuous_elapsed_sec
+                if sample["visible"]:
+                    max_target_elapsed = trajectory_origin_elapsed_sec + (trajectory[-1]["offset_sec"] if trajectory else elapsed_sec)
+                    target_lookahead_sec = self.feedforward_lead_sec if TRACK_USE_LEAD else self.track_command_interval_sec
+                    ideal_target_elapsed_sec = min(max_target_elapsed, continuous_elapsed_sec + target_lookahead_sec)
+                    target_elapsed_sec = ideal_target_elapsed_sec
+                    if tracking_started:
+                        command_sample, target_elapsed_sec = sample_limited_tracking_target_continuous(
+                            ts,
+                            observer,
+                            sat,
+                            trajectory_start_utc,
+                            trajectory_origin_elapsed_sec,
+                            max_target_elapsed,
+                            last_display_target_elapsed,
+                            target_elapsed_sec,
+                            derivative_dt,
+                            previous_command=last_tracking_command,
+                            max_angle_step_deg=self.max_angle_step_deg,
+                        )
+                    else:
+                        command_sample = sample_tracking_state_continuous(
+                            ts,
+                            observer,
+                            sat,
+                            trajectory_start_utc,
+                            trajectory_origin_elapsed_sec,
+                            max_target_elapsed,
+                            target_elapsed_sec,
+                            derivative_dt,
+                        )
+
+                if command_sample is None:
+                    time.sleep(self.track_command_interval_sec)
+                    continue
+
+                x_angle = command_sample["x_angle"]
+                y_angle = command_sample["y_angle"]
+                cmd_x_vel_ff = command_sample.get("x_vel", x_vel)
+                cmd_y_vel_ff = command_sample.get("y_vel", y_vel)
+
+                x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
+                cmd_x_angle = x_angle
+                cmd_y_angle = y_angle
+                raw_dx = 0.0 if last_raw_angles is None else raw_x_angle - last_raw_angles[0]
+                raw_dy = 0.0 if last_raw_angles is None else raw_y_angle - last_raw_angles[1]
+                cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
+                cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
                 x_actual = None
                 y_actual = None
                 x_error = 0.0
                 y_error = 0.0
+                x_traj_error = 0.0
+                y_traj_error = 0.0
+                capture_error = None
+                x_control_mode = None
+                x_input_mode = None
+                y_control_mode = None
+                y_input_mode = None
+                x_controller_vel_limit = None
+                y_controller_vel_limit = None
+                x_traj_vel_limit = None
+                x_traj_accel_limit = None
+                x_traj_decel_limit = None
+                y_traj_vel_limit = None
+                y_traj_accel_limit = None
+                y_traj_decel_limit = None
 
                 if self.control:
                     try:
+                        ideal_sample = sample_tracking_state_continuous(
+                            ts,
+                            observer,
+                            sat,
+                            trajectory_start_utc,
+                            trajectory_origin_elapsed_sec,
+                            max_target_elapsed if sample["visible"] else trajectory_origin_elapsed_sec + (trajectory[-1]["offset_sec"] if trajectory else elapsed_sec),
+                            ideal_target_elapsed_sec,
+                            derivative_dt,
+                        )
+                        x_axis0 = self.control.get_odrive("x").axis0
+                        y_axis0 = self.control.get_odrive("y").axis0
+                        x_control_mode = int(x_axis0.controller.config.control_mode)
+                        x_input_mode = int(x_axis0.controller.config.input_mode)
+                        y_control_mode = int(y_axis0.controller.config.control_mode)
+                        y_input_mode = int(y_axis0.controller.config.input_mode)
+                        x_controller_vel_limit = float(x_axis0.controller.config.vel_limit)
+                        y_controller_vel_limit = float(y_axis0.controller.config.vel_limit)
+                        x_traj_vel_limit = float(x_axis0.trap_traj.config.vel_limit)
+                        x_traj_accel_limit = float(x_axis0.trap_traj.config.accel_limit)
+                        x_traj_decel_limit = float(x_axis0.trap_traj.config.decel_limit)
+                        y_traj_vel_limit = float(y_axis0.trap_traj.config.vel_limit)
+                        y_traj_accel_limit = float(y_axis0.trap_traj.config.accel_limit)
+                        y_traj_decel_limit = float(y_axis0.trap_traj.config.decel_limit)
                         x_actual = self.control.get_spi_position("x")
                         y_actual = self.control.get_spi_position("y")
-                        x_error = x_angle - x_actual
-                        y_error = y_angle - y_actual
+                        x_error = cmd_x_angle - x_actual
+                        y_error = cmd_y_angle - y_actual
+                        if ideal_sample is not None:
+                            ideal_x_angle, ideal_y_angle = clamp_tracking_angles(
+                                ideal_sample["x_angle"],
+                                ideal_sample["y_angle"],
+                            )
+                            x_traj_error = ideal_x_angle - x_actual
+                            y_traj_error = ideal_y_angle - y_actual
+                        capture_error = max(abs(x_error), abs(y_error))
                     except Exception:
                         x_actual = None
                         y_actual = None
 
+                should_track_now = tracking_started or (
+                    capture_error is not None and capture_error <= self.track_capture_error_deg
+                )
+
+                if TRACK_USE_PASSTHROUGH and sample["visible"] and should_track_now and not tracking_started and self.control:
+                    try:
+                        self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
+                    except Exception:
+                        pass
+
+                if sample["visible"] and should_track_now and not tracking_started:
+                    command_sample, target_elapsed_sec = sample_limited_tracking_target_continuous(
+                        ts,
+                        observer,
+                        sat,
+                        trajectory_start_utc,
+                        trajectory_origin_elapsed_sec,
+                        max_target_elapsed,
+                        last_display_target_elapsed,
+                        target_elapsed_sec,
+                        derivative_dt,
+                        previous_command=last_tracking_command if last_tracking_command is not None else last_display_command,
+                        max_angle_step_deg=self.max_angle_step_deg,
+                    )
+                    if command_sample is not None:
+                        x_angle = command_sample["x_angle"]
+                        y_angle = command_sample["y_angle"]
+                        x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
+                        cmd_x_angle = x_angle
+                        cmd_y_angle = y_angle
+                        cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
+                        cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
+                        cmd_x_vel_ff = command_sample.get("x_vel", cmd_x_vel_ff)
+                        cmd_y_vel_ff = command_sample.get("y_vel", cmd_y_vel_ff)
+                        if x_actual is not None and y_actual is not None:
+                            x_error = cmd_x_angle - x_actual
+                            y_error = cmd_y_angle - y_actual
+                            capture_error = max(abs(x_error), abs(y_error))
+
                 self.set_output_text(
-                    "\n".join(
+                    self.format_output_columns(
                         [
                             f"Satellite: {sat.name}",
                             f"AZ: {az_deg:.3f}",
                             f"EL: {el_deg:.3f}",
-                            f"X Angle: {x_angle:.3f}",
-                            f"Y Angle: {y_angle:.3f}",
+                            f"Raw X: {raw_x_angle:.3f}",
+                            f"Raw Y: {raw_y_angle:.3f}",
+                            f"X Angle: {cmd_x_angle:.3f}",
+                            f"Y Angle: {cmd_y_angle:.3f}",
+                            f"dRaw X: {raw_dx:.3f}",
+                            f"dRaw Y: {raw_dy:.3f}",
+                            f"dCmd X: {cmd_dx:.3f}",
+                            f"dCmd Y: {cmd_dy:.3f}",
+                            f"X Vel: {x_vel:.3f}",
+                            f"Y Vel: {y_vel:.3f}",
+                            f"X Acc: {x_acc:.3f}",
+                            f"Y Acc: {y_acc:.3f}",
+                            f"Rebuilt: {'YES' if rebuilt_trajectory else 'no'}",
                             rise_eta_text,
                             f"X Actual: {x_actual:.3f}" if x_actual is not None else "X Actual: -",
                             f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
-                            f"X Error: {x_error:.3f}",
-                            f"Y Error: {y_error:.3f}",
+                            f"X Cmd Error: {x_error:.3f}",
+                            f"Y Cmd Error: {y_error:.3f}",
+                            f"X Traj Error: {x_traj_error:.3f}",
+                            f"Y Traj Error: {y_traj_error:.3f}",
                             prepoint_status,
                         ]
                     )
                 )
+                log_writer.writerow(
+                    [
+                        now_utc.isoformat(),
+                        f"{continuous_elapsed_sec:.6f}",
+                        f"{elapsed_sec:.6f}",
+                        int(bool(sample["visible"])),
+                        int(bool(should_track_now)),
+                        int(bool(rebuilt_trajectory)),
+                        f"{target_elapsed_sec:.6f}",
+                        f"{ideal_target_elapsed_sec:.6f}",
+                        f"{az_deg:.6f}",
+                        f"{el_deg:.6f}",
+                        f"{raw_x_angle:.6f}",
+                        f"{raw_y_angle:.6f}",
+                        f"{cmd_x_angle:.6f}",
+                        f"{cmd_y_angle:.6f}",
+                        f"{raw_dx:.6f}",
+                        f"{raw_dy:.6f}",
+                        f"{cmd_dx:.6f}",
+                        f"{cmd_dy:.6f}",
+                        f"{x_vel:.6f}",
+                        f"{y_vel:.6f}",
+                        f"{x_acc:.6f}",
+                        f"{y_acc:.6f}",
+                        f"{cmd_x_vel_ff:.6f}",
+                        f"{cmd_y_vel_ff:.6f}",
+                        "" if x_control_mode is None else str(x_control_mode),
+                        "" if x_input_mode is None else str(x_input_mode),
+                        "" if y_control_mode is None else str(y_control_mode),
+                        "" if y_input_mode is None else str(y_input_mode),
+                        "" if x_controller_vel_limit is None else f"{x_controller_vel_limit:.6f}",
+                        "" if y_controller_vel_limit is None else f"{y_controller_vel_limit:.6f}",
+                        "" if x_traj_vel_limit is None else f"{x_traj_vel_limit:.6f}",
+                        "" if x_traj_accel_limit is None else f"{x_traj_accel_limit:.6f}",
+                        "" if x_traj_decel_limit is None else f"{x_traj_decel_limit:.6f}",
+                        "" if y_traj_vel_limit is None else f"{y_traj_vel_limit:.6f}",
+                        "" if y_traj_accel_limit is None else f"{y_traj_accel_limit:.6f}",
+                        "" if y_traj_decel_limit is None else f"{y_traj_decel_limit:.6f}",
+                        "" if x_actual is None else f"{x_actual:.6f}",
+                        "" if y_actual is None else f"{y_actual:.6f}",
+                        f"{x_error:.6f}",
+                        f"{y_error:.6f}",
+                        f"{x_traj_error:.6f}",
+                        f"{y_traj_error:.6f}",
+                        "" if capture_error is None else f"{capture_error:.6f}",
+                        prepoint_status,
+                    ]
+                )
+                log_file.flush()
+                last_raw_angles = (raw_x_angle, raw_y_angle)
+                last_display_command = (cmd_x_angle, cmd_y_angle)
+                last_display_target_elapsed = target_elapsed_sec
 
                 if sample["visible"]:
                     was_visible = True
                     prepointed = False
 
-                    if self.control and not tracking_started:
-                        try:
-                            filter_bandwidth = max(1.0, 1.0 / self.track_command_interval_sec)
-                            self.control.enter_tracking_mode_all(input_filter_bandwidth=filter_bandwidth)
-                        except Exception:
-                            pass
+                    if self.control and should_track_now:
+                        self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
 
-                    if self.control and tracking_started:
-                        self.update_error_plot(now_monotonic - tracking_start_monotonic, x_error, y_error)
+                    if not self.running or sat_index != self.current_sat_index:
+                        break
 
-                    consumed_sleep = 0.0
                     if self.control:
-                        last_tracking_command, consumed_sleep = self.stream_tracking_command(
-                            last_tracking_command,
-                            (x_angle, y_angle),
-                            self.track_command_interval_sec,
-                        )
-                    tracking_started = True
+                        if should_track_now:
+                            update_odrive_axes_with_velocity(
+                                cmd_x_angle,
+                                cmd_y_angle,
+                                cmd_x_vel_ff,
+                                cmd_y_vel_ff,
+                                self.control,
+                            )
+                            last_tracking_command = (cmd_x_angle, cmd_y_angle)
+                        else:
+                            update_odrive_axes(x_angle, y_angle, self.control)
+                            last_tracking_command = None
+                    tracking_started = should_track_now
+                    if not tracking_started:
+                        prepoint_status = "Catching up to track"
                 else:
+                    if not self.running or sat_index != self.current_sat_index:
+                        break
+
                     if prepointed and self.control:
                         update_odrive_axes(x_angle, y_angle, self.control)
+                    last_tracking_command = None
+                    last_display_command = None
+                    last_display_target_elapsed = None
 
                     if was_visible:
                         if self.control:
@@ -749,12 +1268,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                     tracking_started = False
                     last_tracking_command = None
-                    consumed_sleep = 0.0
+                    last_display_command = None
+                    last_display_target_elapsed = None
 
-                remaining_sleep = self.track_command_interval_sec - consumed_sleep
-                if remaining_sleep > 0:
-                    time.sleep(remaining_sleep)
+                time.sleep(self.track_command_interval_sec)
         finally:
+            try:
+                log_file.close()
+            except Exception:
+                pass
             if self.control:
                 try:
                     self.control.exit_tracking_mode_all()

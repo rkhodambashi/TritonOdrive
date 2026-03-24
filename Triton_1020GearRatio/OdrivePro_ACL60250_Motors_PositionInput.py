@@ -276,6 +276,24 @@ def command_absolute(target_output_deg, axis="x"):
     state["odrive"].axis0.controller.input_pos = target_motor_turns
 
 
+def command_absolute_with_velocity(target_output_deg, target_output_vel_deg_s=0.0, axis="x"):
+    state = _get_state(axis)
+    output_sign = AXIS_CONFIG[axis]["output_sign"]
+
+    if target_output_deg > MAX_DEGREE:
+        target_output_deg = MAX_DEGREE
+    elif target_output_deg < MIN_DEGREE:
+        target_output_deg = MIN_DEGREE
+
+    target_output_turns = target_output_deg / 360.0
+    target_motor_turns = state["motor_home"] + output_sign * target_output_turns * GEAR_RATIO
+    target_motor_vel_turns_s = output_sign * target_output_vel_deg_s * GEAR_RATIO / 360.0
+
+    state["odrive"].axis0.requested_state = 8
+    state["odrive"].axis0.controller.input_pos = target_motor_turns
+    state["odrive"].axis0.controller.input_vel = target_motor_vel_turns_s
+
+
 def move_relative(delta_deg, axis="x"):
     current_deg = get_current_position(axis=axis)
     move_absolute(current_deg + delta_deg, axis=axis)
@@ -321,7 +339,7 @@ def enter_tracking_mode(axis="x", input_filter_bandwidth=None):
     state["tracking_prev_input_mode"] = axis0.controller.config.input_mode
     state["tracking_prev_input_filter_bandwidth"] = axis0.controller.config.input_filter_bandwidth
     axis0.controller.config.control_mode = 3
-    axis0.controller.config.input_mode = 3
+    axis0.controller.config.input_mode = 1
     if input_filter_bandwidth is not None:
         axis0.controller.config.input_filter_bandwidth = input_filter_bandwidth
     axis0.controller.input_pos = current_motor_pos
@@ -379,6 +397,13 @@ def command_absolute_pair(x_deg=None, y_deg=None):
         command_absolute(x_deg, axis="x")
     if y_deg is not None:
         command_absolute(y_deg, axis="y")
+
+
+def command_absolute_pair_with_velocity(x_deg=None, y_deg=None, x_vel_deg_s=0.0, y_vel_deg_s=0.0):
+    if x_deg is not None:
+        command_absolute_with_velocity(x_deg, target_output_vel_deg_s=x_vel_deg_s, axis="x")
+    if y_deg is not None:
+        command_absolute_with_velocity(y_deg, target_output_vel_deg_s=y_vel_deg_s, axis="y")
 
 
 def move_relative_pair(x_delta=None, y_delta=None):
