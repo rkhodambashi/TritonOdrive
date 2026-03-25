@@ -29,6 +29,9 @@ TRACK_FILTER_BANDWIDTH_HZ = 20.0
 TRACK_USE_FILTER = False
 TRACK_USE_LEAD = False
 TRACK_USE_PASSTHROUGH = True
+TRACK_USE_TIME_SPLIT = False
+TRACK_MAX_DEGREE = 91.0
+TRACK_MIN_DEGREE = -91.0
 
 
 def Kvector(AZ, EL):
@@ -83,8 +86,8 @@ def Yangle(AZ, EL):
 
 
 def update_odrive_axes(x_angle_deg, y_angle_deg, control):
-    x_angle_deg = max(min(x_angle_deg, 90), -90)
-    y_angle_deg = max(min(y_angle_deg, 90), -90)
+    x_angle_deg = max(min(x_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE)
+    y_angle_deg = max(min(y_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE)
     try:
         control.command_absolute_pair(x_deg=x_angle_deg, y_deg=y_angle_deg)
     except Exception as e:
@@ -92,8 +95,8 @@ def update_odrive_axes(x_angle_deg, y_angle_deg, control):
 
 
 def update_odrive_axes_with_velocity(x_angle_deg, y_angle_deg, x_vel_deg_s, y_vel_deg_s, control):
-    x_angle_deg = max(min(x_angle_deg, 90), -90)
-    y_angle_deg = max(min(y_angle_deg, 90), -90)
+    x_angle_deg = max(min(x_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE)
+    y_angle_deg = max(min(y_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE)
     try:
         control.command_absolute_pair_with_velocity(
             x_deg=x_angle_deg,
@@ -107,8 +110,8 @@ def update_odrive_axes_with_velocity(x_angle_deg, y_angle_deg, x_vel_deg_s, y_ve
 
 def clamp_tracking_angles(x_angle_deg, y_angle_deg):
     return (
-        max(min(x_angle_deg, 90), -90),
-        max(min(y_angle_deg, 90), -90),
+        max(min(x_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE),
+        max(min(y_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE),
     )
 
 
@@ -330,6 +333,35 @@ def sample_tracking_state_continuous(
     current["y_vel"] = (next_sample["y_angle"] - prev_sample["y_angle"]) / actual_dt
 
     center_dt = max(1e-4, actual_dt / 2.0)
+    current["x_acc"] = (next_sample["x_angle"] - 2.0 * current["x_angle"] + prev_sample["x_angle"]) / (center_dt * center_dt)
+    current["y_acc"] = (next_sample["y_angle"] - 2.0 * current["y_angle"] + prev_sample["y_angle"]) / (center_dt * center_dt)
+    return current
+
+
+def sample_tracking_state_utc(ts, observer, sat, sample_time_utc, derivative_dt_sec):
+    current = build_pointing_sample(ts, observer, sat, sample_time_utc, 0.0)
+
+    dt = max(1e-4, derivative_dt_sec)
+    prev_sample = build_pointing_sample(
+        ts,
+        observer,
+        sat,
+        sample_time_utc - datetime.timedelta(seconds=dt),
+        -dt,
+    )
+    next_sample = build_pointing_sample(
+        ts,
+        observer,
+        sat,
+        sample_time_utc + datetime.timedelta(seconds=dt),
+        dt,
+    )
+
+    actual_dt = max(1e-4, 2.0 * dt)
+    current["x_vel"] = (next_sample["x_angle"] - prev_sample["x_angle"]) / actual_dt
+    current["y_vel"] = (next_sample["y_angle"] - prev_sample["y_angle"]) / actual_dt
+
+    center_dt = max(1e-4, dt)
     current["x_acc"] = (next_sample["x_angle"] - 2.0 * current["x_angle"] + prev_sample["x_angle"]) / (center_dt * center_dt)
     current["y_acc"] = (next_sample["y_angle"] - 2.0 * current["y_angle"] + prev_sample["y_angle"]) / (center_dt * center_dt)
     return current
@@ -903,13 +935,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
         )
         was_visible = False
         tracking_started = False
+        plot_started = False
         last_tracking_command = None
         last_display_target_elapsed = None
         last_raw_angles = None
         last_display_command = None
-        trajectory = []
-        trajectory_origin_elapsed_sec = 0.0
-        trajectory_start_utc = None
         next_rise_utc = get_next_rise_time(ts, observer, sat)
         prepointed = False
         tracking_start_monotonic = time.monotonic()
@@ -921,33 +951,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 continuous_elapsed_sec = now_monotonic - tracking_start_monotonic
                 rebuilt_trajectory = False
 
-                if (
-                    not trajectory
-                    or trajectory_start_utc is None
-                    or continuous_elapsed_sec - trajectory_origin_elapsed_sec >= self.trajectory_horizon_sec - self.trajectory_rebuild_margin_sec
-                ):
-                    trajectory_origin_elapsed_sec = min(
-                        continuous_elapsed_sec,
-                        last_display_target_elapsed if last_display_target_elapsed is not None else continuous_elapsed_sec,
-                    )
-                    trajectory_start_utc = now_utc - datetime.timedelta(
-                        seconds=continuous_elapsed_sec - trajectory_origin_elapsed_sec
-                    )
-                    trajectory = build_tracking_trajectory(
-                        ts,
-                        observer,
-                        sat,
-                        trajectory_start_utc,
-                        self.trajectory_horizon_sec,
-                        self.trajectory_point_spacing_sec,
-                        self.max_angle_step_deg,
-                        self.min_trajectory_spacing_sec,
-                    )
-                    rebuilt_trajectory = True
-
                 derivative_dt = min(self.track_command_interval_sec, self.trajectory_point_spacing_sec)
-                elapsed_sec = continuous_elapsed_sec - trajectory_origin_elapsed_sec
-                sample = sample_tracking_state(trajectory, elapsed_sec, derivative_dt)
+                elapsed_sec = continuous_elapsed_sec
+                sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
                 if sample is None:
                     time.sleep(self.track_command_interval_sec)
                     continue
@@ -986,33 +992,23 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 target_elapsed_sec = continuous_elapsed_sec
                 ideal_target_elapsed_sec = continuous_elapsed_sec
                 if sample["visible"]:
-                    max_target_elapsed = trajectory_origin_elapsed_sec + (trajectory[-1]["offset_sec"] if trajectory else elapsed_sec)
                     target_lookahead_sec = self.feedforward_lead_sec if TRACK_USE_LEAD else self.track_command_interval_sec
-                    ideal_target_elapsed_sec = min(max_target_elapsed, continuous_elapsed_sec + target_lookahead_sec)
+                    ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
                     target_elapsed_sec = ideal_target_elapsed_sec
-                    if tracking_started:
-                        command_sample, target_elapsed_sec = sample_limited_tracking_target_continuous(
+                    if tracking_started and TRACK_USE_TIME_SPLIT:
+                        command_sample = sample_tracking_state_utc(
                             ts,
                             observer,
                             sat,
-                            trajectory_start_utc,
-                            trajectory_origin_elapsed_sec,
-                            max_target_elapsed,
-                            last_display_target_elapsed,
-                            target_elapsed_sec,
+                            now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                             derivative_dt,
-                            previous_command=last_tracking_command,
-                            max_angle_step_deg=self.max_angle_step_deg,
                         )
                     else:
-                        command_sample = sample_tracking_state_continuous(
+                        command_sample = sample_tracking_state_utc(
                             ts,
                             observer,
                             sat,
-                            trajectory_start_utc,
-                            trajectory_origin_elapsed_sec,
-                            max_target_elapsed,
-                            target_elapsed_sec,
+                            now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                             derivative_dt,
                         )
 
@@ -1054,16 +1050,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 if self.control:
                     try:
-                        ideal_sample = sample_tracking_state_continuous(
-                            ts,
-                            observer,
-                            sat,
-                            trajectory_start_utc,
-                            trajectory_origin_elapsed_sec,
-                            max_target_elapsed if sample["visible"] else trajectory_origin_elapsed_sec + (trajectory[-1]["offset_sec"] if trajectory else elapsed_sec),
-                            ideal_target_elapsed_sec,
-                            derivative_dt,
-                        )
+                        ideal_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
                         x_axis0 = self.control.get_odrive("x").axis0
                         y_axis0 = self.control.get_odrive("y").axis0
                         x_control_mode = int(x_axis0.controller.config.control_mode)
@@ -1094,29 +1081,22 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         x_actual = None
                         y_actual = None
 
-                should_track_now = tracking_started or (
-                    capture_error is not None and capture_error <= self.track_capture_error_deg
-                )
+                track_ready = capture_error is not None and capture_error <= self.track_capture_error_deg
+                should_track_now = sample["visible"] and (tracking_started or track_ready)
 
-                if TRACK_USE_PASSTHROUGH and sample["visible"] and should_track_now and not tracking_started and self.control:
+                if TRACK_USE_PASSTHROUGH and should_track_now and not tracking_started and self.control:
                     try:
                         self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
                     except Exception:
                         pass
 
-                if sample["visible"] and should_track_now and not tracking_started:
-                    command_sample, target_elapsed_sec = sample_limited_tracking_target_continuous(
+                if should_track_now and not tracking_started and TRACK_USE_TIME_SPLIT:
+                    command_sample = sample_tracking_state_utc(
                         ts,
                         observer,
                         sat,
-                        trajectory_start_utc,
-                        trajectory_origin_elapsed_sec,
-                        max_target_elapsed,
-                        last_display_target_elapsed,
-                        target_elapsed_sec,
+                        now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                         derivative_dt,
-                        previous_command=last_tracking_command if last_tracking_command is not None else last_display_command,
-                        max_angle_step_deg=self.max_angle_step_deg,
                     )
                     if command_sample is not None:
                         x_angle = command_sample["x_angle"]
@@ -1132,6 +1112,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             x_error = cmd_x_angle - x_actual
                             y_error = cmd_y_angle - y_actual
                             capture_error = max(abs(x_error), abs(y_error))
+
+                displayed_tracking_started = int(bool(tracking_started or should_track_now))
 
                 self.set_output_text(
                     self.format_output_columns(
@@ -1169,7 +1151,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{continuous_elapsed_sec:.6f}",
                         f"{elapsed_sec:.6f}",
                         int(bool(sample["visible"])),
-                        int(bool(should_track_now)),
+                        displayed_tracking_started,
                         int(bool(rebuilt_trajectory)),
                         f"{target_elapsed_sec:.6f}",
                         f"{ideal_target_elapsed_sec:.6f}",
@@ -1220,9 +1202,6 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     was_visible = True
                     prepointed = False
 
-                    if self.control and should_track_now:
-                        self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
-
                     if not self.running or sat_index != self.current_sat_index:
                         break
 
@@ -1236,10 +1215,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 self.control,
                             )
                             last_tracking_command = (cmd_x_angle, cmd_y_angle)
+                            if not tracking_started:
+                                tracking_started = True
+                            plot_started = True
                         else:
                             update_odrive_axes(x_angle, y_angle, self.control)
                             last_tracking_command = None
-                    tracking_started = should_track_now
+                            plot_started = True
+                    if plot_started:
+                        self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
                     if not tracking_started:
                         prepoint_status = "Catching up to track"
                 else:
@@ -1267,6 +1251,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         break
 
                     tracking_started = False
+                    plot_started = False
                     last_tracking_command = None
                     last_display_command = None
                     last_display_target_elapsed = None
