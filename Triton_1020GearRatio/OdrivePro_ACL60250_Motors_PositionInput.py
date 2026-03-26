@@ -10,8 +10,10 @@ VELOCITY_TOL = 0.001
 
 MAX_DEGREE = 90
 MIN_DEGREE = -90
+TRACKING_MAX_DEGREE = 91
+TRACKING_MIN_DEGREE = -91
 
-X_SPI_HOME_RAW = 0.367891 #0.4863780736923218
+X_SPI_HOME_RAW = 0.376205 #0.367891 #0.4863780736923218
 Y_SPI_HOME_RAW = 0.173497 #0.4863780736923218
 GO_TO_HOME_ON_STARTUP = True
 
@@ -280,10 +282,10 @@ def command_absolute_with_velocity(target_output_deg, target_output_vel_deg_s=0.
     state = _get_state(axis)
     output_sign = AXIS_CONFIG[axis]["output_sign"]
 
-    if target_output_deg > MAX_DEGREE:
-        target_output_deg = MAX_DEGREE
-    elif target_output_deg < MIN_DEGREE:
-        target_output_deg = MIN_DEGREE
+    if target_output_deg > TRACKING_MAX_DEGREE:
+        target_output_deg = TRACKING_MAX_DEGREE
+    elif target_output_deg < TRACKING_MIN_DEGREE:
+        target_output_deg = TRACKING_MIN_DEGREE
 
     target_output_turns = target_output_deg / 360.0
     target_motor_turns = state["motor_home"] + output_sign * target_output_turns * GEAR_RATIO

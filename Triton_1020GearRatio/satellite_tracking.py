@@ -34,6 +34,19 @@ TRACK_MAX_DEGREE = 91.0
 TRACK_MIN_DEGREE = -91.0
 
 
+def get_local_timezone():
+    return datetime.datetime.now().astimezone().tzinfo
+
+
+def format_local_datetime(dt_utc, include_seconds=False):
+    if dt_utc is None:
+        return "-"
+    local_dt = dt_utc.astimezone(get_local_timezone())
+    if include_seconds:
+        return local_dt.strftime("%Y-%m-%d %I:%M:%S %p")
+    return local_dt.strftime("%Y-%m-%d %I:%M %p")
+
+
 def Kvector(AZ, EL):
     azRad = AZ * pi / 180.0
     elRad = EL * pi / 180.0
@@ -477,7 +490,16 @@ def get_pointing_sample(ts, observer, sat, sample_time_utc):
 
 
 class SatelliteTrackingWindow(tk.Toplevel):
-    def __init__(self, parent, odrvs=None, control=None, observer_lat=33.67, observer_lon=-112.09):
+    def __init__(
+        self,
+        parent,
+        odrvs=None,
+        control=None,
+        observer_lat=33.67,
+        observer_lon=-112.09,
+        preposition_gains=None,
+        tracking_gains=None,
+    ):
         super().__init__(parent)
 
         self.title("Satellite Tracking")
@@ -485,6 +507,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         self.odrvs = odrvs or {}
         self.control = control
+        self.preposition_gains = preposition_gains
+        self.tracking_gains = tracking_gains
 
         self.observer_lat = observer_lat
         self.observer_lon = observer_lon
@@ -508,6 +532,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         self.satellites = []
         self.display_map = []
+        self.satellite_labels = []
 
         top_frame = ttk.Frame(self)
         top_frame.pack(fill="x", padx=10, pady=8)
@@ -544,6 +569,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         ttk.Label(tle_frame, text="Select Satellite:").grid(row=2, column=0, sticky="w", padx=5, pady=(8, 2))
         self.sat_combobox = ttk.Combobox(tle_frame, state="readonly", width=48)
         self.sat_combobox.grid(row=3, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
+        ttk.Button(tle_frame, text="Refresh Pass Times", command=self.refresh_satellite_display).grid(
+            row=2, column=1, sticky="e", padx=5, pady=(8, 2)
+        )
 
         button_row = ttk.Frame(tle_frame)
         button_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=8)
@@ -769,15 +797,30 @@ class SatelliteTrackingWindow(tk.Toplevel):
             messagebox.showerror("Error", "No satellites found")
             return
 
+        self.refresh_satellite_display()
+
+        messagebox.showinfo("TLE Loaded", f"{len(self.satellites)} satellites loaded")
+
+    def refresh_satellite_display(self):
+        if not self.satellites:
+            return
+
+        previous_sat_index = None
+        current_selection = self.sat_combobox.current()
+        if current_selection >= 0 and current_selection < len(self.display_map):
+            previous_sat_index = self.display_map[current_selection]
+
         ts = load.timescale()
         observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon)
 
         display_data = []
         self.display_map = []
 
+        now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
+
         for idx, sat in enumerate(self.satellites):
             t0 = ts.now()
-            t1 = ts.from_datetime(datetime.datetime.utcnow().replace(tzinfo=utc) + datetime.timedelta(hours=24))
+            t1 = ts.from_datetime(now_utc + datetime.timedelta(hours=24))
 
             try:
                 times, events = sat.find_events(observer, t0, t1, altitude_degrees=0.0)
@@ -789,38 +832,48 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         break
 
                 if next_rise:
-                    dt = next_rise - datetime.datetime.utcnow().replace(tzinfo=utc)
-                    minutes = int(dt.total_seconds() / 60)
-                    label = f"{sat.name} - Rise in {minutes} min"
-                    sort_key = minutes
+                    dt = next_rise - now_utc
+                    minutes = max(0, int(dt.total_seconds() / 60))
+                    local_rise_text = format_local_datetime(next_rise)
+                    label = f"{sat.name} [{sat.model.satnum}] - {local_rise_text} local (in {minutes} min)"
+                    sort_key = dt.total_seconds()
                 else:
-                    label = f"{sat.name} - No pass soon"
-                    sort_key = 99999
+                    label = f"{sat.name} [{sat.model.satnum}] - No pass soon"
+                    sort_key = 999999999
 
             except Exception:
-                label = f"{sat.name}"
-                sort_key = 99999
+                label = f"{sat.name} [{sat.model.satnum}]"
+                sort_key = 999999999
 
             display_data.append((sort_key, label, idx))
 
         display_data.sort(key=lambda x: x[0])
 
         display_list = []
-        for item in display_data:
+        new_selection = None
+        for pos, item in enumerate(display_data):
             display_list.append(item[1])
             self.display_map.append(item[2])
+            if previous_sat_index is not None and item[2] == previous_sat_index:
+                new_selection = pos
 
+        self.satellite_labels = display_list
         self.sat_combobox["values"] = display_list
 
         if display_list:
-            self.sat_combobox.current(0)
-
-        messagebox.showinfo("TLE Loaded", f"{len(self.satellites)} satellites loaded")
+            if new_selection is not None:
+                self.sat_combobox.current(new_selection)
+            elif current_selection >= 0 and current_selection < len(display_list):
+                self.sat_combobox.current(current_selection)
+            else:
+                self.sat_combobox.current(0)
 
     def start_tracking_thread(self):
         if not self.satellites:
             messagebox.showerror("Error", "Load TLE first")
             return
+
+        self.refresh_satellite_display()
 
         sel = self.sat_combobox.current()
 
@@ -869,6 +922,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.control.exit_tracking_mode_all()
             except Exception:
                 pass
+            if self.preposition_gains:
+                try:
+                    self.control.set_gains_all(*self.preposition_gains)
+                except Exception:
+                    pass
             try:
                 self.control.move_absolute_pair(x_deg=0, y_deg=0)
             except Exception:
@@ -935,7 +993,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         )
         was_visible = False
         tracking_started = False
-        plot_started = False
+        tracking_phase = "PREPOSITIONING"
+        settled_cycles = 0
         last_tracking_command = None
         last_display_target_elapsed = None
         last_raw_angles = None
@@ -943,6 +1002,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
         next_rise_utc = get_next_rise_time(ts, observer, sat)
         prepointed = False
         tracking_start_monotonic = time.monotonic()
+
+        if self.control and self.preposition_gains:
+            try:
+                self.control.set_gains_all(*self.preposition_gains)
+            except Exception:
+                pass
 
         try:
             while self.running and sat_index == self.current_sat_index:
@@ -953,27 +1018,33 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 derivative_dt = min(self.track_command_interval_sec, self.trajectory_point_spacing_sec)
                 elapsed_sec = continuous_elapsed_sec
-                sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
-                if sample is None:
+                live_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
+                if live_sample is None:
                     time.sleep(self.track_command_interval_sec)
                     continue
+                sample = live_sample
 
                 prepoint_status = "Tracking pass"
                 rise_eta_text = "Rise ETA: -"
+                rise_local_text = "Rise Local: -"
+                pickup_window_active = False
+                prepoint_target_sample = None
                 if next_rise_utc and not was_visible:
                     seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
                     if seconds_to_rise > 0:
                         rise_eta_text = f"Rise ETA: {seconds_to_rise:.1f} s"
+                        rise_local_text = f"Rise Local: {format_local_datetime(next_rise_utc, include_seconds=True)}"
                         prepoint_status = f"Waiting for rise in {seconds_to_rise:.1f} s"
                         if seconds_to_rise <= self.prepoint_lead_time_sec:
                             rise_sample = get_pointing_sample(ts, observer, sat, next_rise_utc)
-                            sample = {
+                            prepoint_target_sample = {
                                 "az_deg": rise_sample["az_deg"],
                                 "el_deg": rise_sample["el_deg"],
                                 "x_angle": rise_sample["x_angle"],
                                 "y_angle": rise_sample["y_angle"],
                                 "visible": False,
                             }
+                            pickup_window_active = True
                             prepointed = True
                             prepoint_status = f"Prepointing rise in {seconds_to_rise:.1f} s"
 
@@ -988,7 +1059,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 x_acc = sample.get("x_acc", 0.0)
                 y_acc = sample.get("y_acc", 0.0)
 
-                command_sample = sample
+                command_sample = prepoint_target_sample if prepoint_target_sample is not None and tracking_phase != "TRACKING" else sample
                 target_elapsed_sec = continuous_elapsed_sec
                 ideal_target_elapsed_sec = continuous_elapsed_sec
                 if sample["visible"]:
@@ -1047,7 +1118,6 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 y_traj_vel_limit = None
                 y_traj_accel_limit = None
                 y_traj_decel_limit = None
-
                 if self.control:
                     try:
                         ideal_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
@@ -1082,23 +1152,35 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         y_actual = None
 
                 track_ready = capture_error is not None and capture_error <= self.track_capture_error_deg
-                should_track_now = sample["visible"] and (tracking_started or track_ready)
+                track_gate_open = sample["visible"] or pickup_window_active
 
-                if TRACK_USE_PASSTHROUGH and should_track_now and not tracking_started and self.control:
+                if tracking_phase != "TRACKING" and track_gate_open and track_ready:
+                    settled_cycles += 1
+                elif tracking_phase != "TRACKING":
+                    settled_cycles = 0
+
+                enter_tracking_now = tracking_phase != "TRACKING" and track_gate_open and settled_cycles >= 3
+                should_track_now = track_gate_open and (tracking_phase == "TRACKING" or enter_tracking_now)
+
+                if TRACK_USE_PASSTHROUGH and enter_tracking_now and self.control:
                     try:
                         self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
                     except Exception:
                         pass
 
-                if should_track_now and not tracking_started and TRACK_USE_TIME_SPLIT:
-                    command_sample = sample_tracking_state_utc(
+                if should_track_now:
+                    target_lookahead_sec = self.feedforward_lead_sec if TRACK_USE_LEAD else self.track_command_interval_sec
+                    ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
+                    target_elapsed_sec = ideal_target_elapsed_sec
+                    tracking_command_sample = sample_tracking_state_utc(
                         ts,
                         observer,
                         sat,
                         now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                         derivative_dt,
                     )
-                    if command_sample is not None:
+                    if tracking_command_sample is not None:
+                        command_sample = tracking_command_sample
                         x_angle = command_sample["x_angle"]
                         y_angle = command_sample["y_angle"]
                         x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
@@ -1112,8 +1194,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             x_error = cmd_x_angle - x_actual
                             y_error = cmd_y_angle - y_actual
                             capture_error = max(abs(x_error), abs(y_error))
+                        if not sample["visible"]:
+                            prepoint_status = "Below-horizon pickup"
 
-                displayed_tracking_started = int(bool(tracking_started or should_track_now))
+                displayed_tracking_started = int(bool(tracking_phase == "TRACKING" or enter_tracking_now))
 
                 self.set_output_text(
                     self.format_output_columns(
@@ -1135,6 +1219,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             f"Y Acc: {y_acc:.3f}",
                             f"Rebuilt: {'YES' if rebuilt_trajectory else 'no'}",
                             rise_eta_text,
+                            rise_local_text,
                             f"X Actual: {x_actual:.3f}" if x_actual is not None else "X Actual: -",
                             f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
                             f"X Cmd Error: {x_error:.3f}",
@@ -1202,11 +1287,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     was_visible = True
                     prepointed = False
 
+                if should_track_now or sample["visible"]:
                     if not self.running or sat_index != self.current_sat_index:
                         break
 
                     if self.control:
                         if should_track_now:
+                            if enter_tracking_now and self.tracking_gains:
+                                try:
+                                    self.control.set_gains_all(*self.tracking_gains)
+                                except Exception:
+                                    pass
                             update_odrive_axes_with_velocity(
                                 cmd_x_angle,
                                 cmd_y_angle,
@@ -1215,16 +1306,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 self.control,
                             )
                             last_tracking_command = (cmd_x_angle, cmd_y_angle)
-                            if not tracking_started:
+                            if enter_tracking_now:
+                                tracking_phase = "TRACKING"
                                 tracking_started = True
-                            plot_started = True
+                            self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
                         else:
                             update_odrive_axes(x_angle, y_angle, self.control)
                             last_tracking_command = None
-                            plot_started = True
-                    if plot_started:
-                        self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
-                    if not tracking_started:
+                    if not tracking_started and sample["visible"]:
                         prepoint_status = "Catching up to track"
                 else:
                     if not self.running or sat_index != self.current_sat_index:
@@ -1242,6 +1331,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 self.control.exit_tracking_mode_all()
                             except Exception:
                                 pass
+                            if self.preposition_gains:
+                                try:
+                                    self.control.set_gains_all(*self.preposition_gains)
+                                except Exception:
+                                    pass
                             try:
                                 self.control.move_absolute_pair(x_deg=0, y_deg=0)
                             except Exception:
@@ -1251,7 +1345,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         break
 
                     tracking_started = False
-                    plot_started = False
+                    tracking_phase = "PREPOSITIONING"
+                    settled_cycles = 0
                     last_tracking_command = None
                     last_display_command = None
                     last_display_target_elapsed = None
@@ -1267,6 +1362,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     self.control.exit_tracking_mode_all()
                 except Exception:
                     pass
+                if self.preposition_gains:
+                    try:
+                        self.control.set_gains_all(*self.preposition_gains)
+                    except Exception:
+                        pass
 
     def apply_location(self):
         try:

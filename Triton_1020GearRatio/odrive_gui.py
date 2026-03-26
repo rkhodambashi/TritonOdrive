@@ -217,6 +217,22 @@ def apply_gains_small_y():
         pass
 
 
+def get_preposition_gains():
+    return (
+        float(pos_gain_entry.get()),
+        float(vel_gain_entry.get()),
+        float(vel_i_entry.get()),
+    )
+
+
+def get_tracking_gains():
+    return (
+        float(pos_gain_entry_small.get()),
+        float(vel_gain_entry_small.get()),
+        float(vel_i_entry_small.get()),
+    )
+
+
 def apply_traj():
     try:
         vel = float(traj_vel_entry.get())
@@ -238,7 +254,15 @@ def apply_traj_y():
 
 
 def open_satellite_tracking():
-    SatelliteTrackingWindow(root, odrvs=axis_devices, control=control, observer_lat=33.677, observer_lon=-112.093)
+    SatelliteTrackingWindow(
+        root,
+        odrvs=axis_devices,
+        control=control,
+        observer_lat=33.677,
+        observer_lon=-112.093,
+        preposition_gains=get_preposition_gains(),
+        tracking_gains=get_tracking_gains(),
+    )
 
 
 def open_manual_pointing():
@@ -556,6 +580,8 @@ gains_frame = ttk.Frame(left_frame)
 gains_frame.pack()
 
 ttk.Label(gains_frame, text="X Axis").grid(row=0, column=0, columnspan=4, pady=(0, 4))
+ttk.Label(gains_frame, text="Preposition / Pointing").grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 10))
+ttk.Label(gains_frame, text="Tracking").grid(row=0, column=2, columnspan=2, sticky="w", padx=10)
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=1, column=0)
 pos_gain_entry = ttk.Entry(gains_frame, width=8)
@@ -572,26 +598,28 @@ vel_i_entry = ttk.Entry(gains_frame, width=8)
 vel_i_entry.insert(0, f"{control.DEFAULT_VEL_INTEGRATOR_GAIN:g}")
 vel_i_entry.grid(row=3, column=1, padx=5)
 
-ttk.Button(gains_frame, text="Apply Gains", command=apply_gains).grid(row=4, column=0, columnspan=2, pady=5)
+ttk.Button(gains_frame, text="Apply Preposition Gains", command=apply_gains).grid(row=4, column=0, columnspan=2, pady=5)
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=1, column=2, padx=10)
 pos_gain_entry_small = ttk.Entry(gains_frame, width=8)
-pos_gain_entry_small.insert(0, "100")
+pos_gain_entry_small.insert(0, "1")
 pos_gain_entry_small.grid(row=1, column=3)
 
 ttk.Label(gains_frame, text="Velocity Gain").grid(row=2, column=2)
 vel_gain_entry_small = ttk.Entry(gains_frame, width=8)
-vel_gain_entry_small.insert(0, "0.2")
+vel_gain_entry_small.insert(0, "0.3")
 vel_gain_entry_small.grid(row=2, column=3)
 
 ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=3, column=2)
 vel_i_entry_small = ttk.Entry(gains_frame, width=8)
-vel_i_entry_small.insert(0, "5")
+vel_i_entry_small.insert(0, "1")
 vel_i_entry_small.grid(row=3, column=3)
 
-ttk.Button(gains_frame, text="Apply Gains", command=apply_gains_small).grid(row=4, column=2, columnspan=2, pady=5)
+ttk.Button(gains_frame, text="Apply Tracking Gains", command=apply_gains_small).grid(row=4, column=2, columnspan=2, pady=5)
 
 ttk.Label(gains_frame, text="Y Axis").grid(row=5, column=0, columnspan=4, pady=(10, 4))
+ttk.Label(gains_frame, text="Preposition / Pointing").grid(row=5, column=0, columnspan=2, sticky="w", padx=(0, 10))
+ttk.Label(gains_frame, text="Tracking").grid(row=5, column=2, columnspan=2, sticky="w", padx=10)
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=6, column=0)
 pos_gain_entry_y = ttk.Entry(gains_frame, width=8)
@@ -608,24 +636,24 @@ vel_i_entry_y = ttk.Entry(gains_frame, width=8)
 vel_i_entry_y.insert(0, f"{control.DEFAULT_VEL_INTEGRATOR_GAIN:g}")
 vel_i_entry_y.grid(row=8, column=1, padx=5)
 
-ttk.Button(gains_frame, text="Apply Gains", command=apply_gains_y).grid(row=9, column=0, columnspan=2, pady=5)
+ttk.Button(gains_frame, text="Apply Preposition Gains", command=apply_gains_y).grid(row=9, column=0, columnspan=2, pady=5)
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=6, column=2, padx=10)
 pos_gain_entry_small_y = ttk.Entry(gains_frame, width=8)
-pos_gain_entry_small_y.insert(0, "100")
+pos_gain_entry_small_y.insert(0, "1")
 pos_gain_entry_small_y.grid(row=6, column=3)
 
 ttk.Label(gains_frame, text="Velocity Gain").grid(row=7, column=2)
 vel_gain_entry_small_y = ttk.Entry(gains_frame, width=8)
-vel_gain_entry_small_y.insert(0, "0.2")
+vel_gain_entry_small_y.insert(0, "0.3")
 vel_gain_entry_small_y.grid(row=7, column=3)
 
 ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=8, column=2)
 vel_i_entry_small_y = ttk.Entry(gains_frame, width=8)
-vel_i_entry_small_y.insert(0, "5")
+vel_i_entry_small_y.insert(0, "1")
 vel_i_entry_small_y.grid(row=8, column=3)
 
-ttk.Button(gains_frame, text="Apply Gains", command=apply_gains_small_y).grid(row=9, column=2, columnspan=2, pady=5)
+ttk.Button(gains_frame, text="Apply Tracking Gains", command=apply_gains_small_y).grid(row=9, column=2, columnspan=2, pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
