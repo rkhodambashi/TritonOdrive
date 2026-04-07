@@ -989,6 +989,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         log_writer.writerow(
             [
                 "utc_time",
+                "loop_start_monotonic_sec",
                 "elapsed_sec",
                 "trajectory_elapsed_sec",
                 "sample_visible",
@@ -1031,6 +1032,22 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "x_traj_error_deg",
                 "y_traj_error_deg",
                 "capture_error_deg",
+                "sgp4_live_eval_ms",
+                "sgp4_ideal_eval_ms",
+                "sgp4_command_eval_ms",
+                "spi_x_read_ms",
+                "spi_y_read_ms",
+                "spi_total_ms",
+                "control_snapshot_ms",
+                "command_send_ms",
+                "loop_total_ms",
+                "observed_loop_period_sec",
+                "target_lookahead_sec",
+                "used_meas_to_command_delay_sec",
+                "meas_x_elapsed_sec",
+                "meas_y_elapsed_sec",
+                "meas_mid_elapsed_sec",
+                "command_send_elapsed_sec",
                 "status",
             ]
         )
@@ -1042,6 +1059,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         last_display_target_elapsed = None
         last_raw_angles = None
         last_display_command = None
+        last_loop_start_monotonic = None
+        prev_meas_to_command_delay_sec = self.track_command_interval_sec
         next_rise_utc = get_next_rise_time(ts, observer, sat)
         prepointed = False
         tracking_start_monotonic = time.monotonic()
@@ -1054,14 +1073,41 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         try:
             while self.running and sat_index == self.current_sat_index:
-                now_monotonic = time.monotonic()
+                loop_start_monotonic = time.monotonic()
+                observed_loop_period_sec = (
+                    self.track_command_interval_sec
+                    if last_loop_start_monotonic is None
+                    else loop_start_monotonic - last_loop_start_monotonic
+                )
+                last_loop_start_monotonic = loop_start_monotonic
+                now_monotonic = loop_start_monotonic
                 now_utc = datetime.datetime.utcnow().replace(tzinfo=utc)
                 continuous_elapsed_sec = now_monotonic - tracking_start_monotonic
                 rebuilt_trajectory = False
+                sgp4_live_eval_ms = 0.0
+                sgp4_ideal_eval_ms = 0.0
+                sgp4_command_eval_ms = 0.0
+                spi_x_read_ms = 0.0
+                spi_y_read_ms = 0.0
+                spi_total_ms = 0.0
+                control_snapshot_ms = 0.0
+                command_send_ms = 0.0
+                meas_x_elapsed_sec = None
+                meas_y_elapsed_sec = None
+                meas_mid_elapsed_sec = None
+                command_send_elapsed_sec = None
+                used_meas_to_command_delay_sec = prev_meas_to_command_delay_sec
+                target_lookahead_sec = (
+                    self.feedforward_lead_sec
+                    if TRACK_USE_LEAD
+                    else max(observed_loop_period_sec, used_meas_to_command_delay_sec)
+                )
 
                 derivative_dt = min(self.track_command_interval_sec, self.trajectory_point_spacing_sec)
                 elapsed_sec = continuous_elapsed_sec
+                sgp4_live_start = time.monotonic()
                 live_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
+                sgp4_live_eval_ms = (time.monotonic() - sgp4_live_start) * 1000.0
                 if live_sample is None:
                     time.sleep(self.track_command_interval_sec)
                     continue
@@ -1106,9 +1152,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 target_elapsed_sec = continuous_elapsed_sec
                 ideal_target_elapsed_sec = continuous_elapsed_sec
                 if sample["visible"]:
-                    target_lookahead_sec = self.feedforward_lead_sec if TRACK_USE_LEAD else self.track_command_interval_sec
                     ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
                     target_elapsed_sec = ideal_target_elapsed_sec
+                    sgp4_command_start = time.monotonic()
                     if tracking_started and TRACK_USE_TIME_SPLIT:
                         command_sample = sample_tracking_state_utc(
                             ts,
@@ -1125,6 +1171,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                             derivative_dt,
                         )
+                    sgp4_command_eval_ms = (time.monotonic() - sgp4_command_start) * 1000.0
 
                 if command_sample is None:
                     time.sleep(self.track_command_interval_sec)
@@ -1163,7 +1210,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 y_traj_decel_limit = None
                 if self.control:
                     try:
-                        ideal_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
+                        control_snapshot_start = time.monotonic()
                         x_axis0 = self.control.get_odrive("x").axis0
                         y_axis0 = self.control.get_odrive("y").axis0
                         x_control_mode = int(x_axis0.controller.config.control_mode)
@@ -1178,16 +1225,49 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         y_traj_vel_limit = float(y_axis0.trap_traj.config.vel_limit)
                         y_traj_accel_limit = float(y_axis0.trap_traj.config.accel_limit)
                         y_traj_decel_limit = float(y_axis0.trap_traj.config.decel_limit)
+                        control_snapshot_ms = (time.monotonic() - control_snapshot_start) * 1000.0
+                        spi_window_start = time.monotonic()
+                        spi_x_start = time.monotonic()
                         x_actual = self.control.get_spi_position("x")
+                        spi_x_done = time.monotonic()
+                        spi_x_read_ms = (spi_x_done - spi_x_start) * 1000.0
+                        spi_y_start = time.monotonic()
                         y_actual = self.control.get_spi_position("y")
+                        spi_y_done = time.monotonic()
+                        spi_y_read_ms = (spi_y_done - spi_y_start) * 1000.0
+                        spi_total_ms = (spi_y_done - spi_window_start) * 1000.0
+                        meas_x_elapsed_sec = ((spi_x_start + spi_x_done) * 0.5) - tracking_start_monotonic
+                        meas_y_elapsed_sec = ((spi_y_start + spi_y_done) * 0.5) - tracking_start_monotonic
+                        meas_mid_elapsed_sec = ((spi_window_start + spi_y_done) * 0.5) - tracking_start_monotonic
                         x_error = cmd_x_angle - x_actual
                         y_error = cmd_y_angle - y_actual
-                        if ideal_sample is not None:
-                            ideal_x_angle, ideal_y_angle = clamp_tracking_angles(
-                                ideal_sample["x_angle"],
-                                ideal_sample["y_angle"],
+                        sgp4_ideal_start = time.monotonic()
+                        x_ideal_sample = sample_tracking_state_utc(
+                            ts,
+                            observer,
+                            sat,
+                            now_utc + datetime.timedelta(seconds=meas_x_elapsed_sec - continuous_elapsed_sec),
+                            derivative_dt,
+                        )
+                        y_ideal_sample = sample_tracking_state_utc(
+                            ts,
+                            observer,
+                            sat,
+                            now_utc + datetime.timedelta(seconds=meas_y_elapsed_sec - continuous_elapsed_sec),
+                            derivative_dt,
+                        )
+                        sgp4_ideal_eval_ms = (time.monotonic() - sgp4_ideal_start) * 1000.0
+                        if x_ideal_sample is not None:
+                            ideal_x_angle, _ = clamp_tracking_angles(
+                                x_ideal_sample["x_angle"],
+                                x_ideal_sample["y_angle"],
                             )
                             x_traj_error = ideal_x_angle - x_actual
+                        if y_ideal_sample is not None:
+                            _, ideal_y_angle = clamp_tracking_angles(
+                                y_ideal_sample["x_angle"],
+                                y_ideal_sample["y_angle"],
+                            )
                             y_traj_error = ideal_y_angle - y_actual
                         capture_error = max(abs(x_error), abs(y_error))
                     except Exception:
@@ -1212,7 +1292,6 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         pass
 
                 if should_track_now:
-                    target_lookahead_sec = self.feedforward_lead_sec if TRACK_USE_LEAD else self.track_command_interval_sec
                     ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
                     target_elapsed_sec = ideal_target_elapsed_sec
                     tracking_command_sample = sample_tracking_state_utc(
@@ -1273,9 +1352,93 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         ]
                     )
                 )
+                last_raw_angles = (raw_x_angle, raw_y_angle)
+                last_display_command = (cmd_x_angle, cmd_y_angle)
+                last_display_target_elapsed = target_elapsed_sec
+
+                if sample["visible"]:
+                    was_visible = True
+                    prepointed = False
+
+                if should_track_now or sample["visible"]:
+                    if not self.running or sat_index != self.current_sat_index:
+                        break
+
+                    if self.control:
+                        if should_track_now:
+                            if enter_tracking_now and self.tracking_gains:
+                                try:
+                                    self.control.set_gains_all(*self.tracking_gains)
+                                except Exception:
+                                    pass
+                            command_send_start = time.monotonic()
+                            update_odrive_axes_with_velocity(
+                                cmd_x_angle,
+                                cmd_y_angle,
+                                cmd_x_vel_ff,
+                                cmd_y_vel_ff,
+                                self.control,
+                            )
+                            command_send_done = time.monotonic()
+                            command_send_ms = (command_send_done - command_send_start) * 1000.0
+                            command_send_elapsed_sec = command_send_done - tracking_start_monotonic
+                            last_tracking_command = (cmd_x_angle, cmd_y_angle)
+                            if enter_tracking_now:
+                                tracking_phase = "TRACKING"
+                                tracking_started = True
+                            self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
+                        else:
+                            command_send_start = time.monotonic()
+                            update_odrive_axes(x_angle, y_angle, self.control)
+                            command_send_done = time.monotonic()
+                            command_send_ms = (command_send_done - command_send_start) * 1000.0
+                            command_send_elapsed_sec = command_send_done - tracking_start_monotonic
+                            last_tracking_command = None
+                    if not tracking_started and sample["visible"]:
+                        prepoint_status = "Catching up to track"
+                else:
+                    if not self.running or sat_index != self.current_sat_index:
+                        break
+
+                    if prepointed and self.control:
+                        update_odrive_axes(x_angle, y_angle, self.control)
+                    last_tracking_command = None
+                    last_display_command = None
+                    last_display_target_elapsed = None
+
+                    if was_visible:
+                        if self.control:
+                            try:
+                                self.control.exit_tracking_mode_all()
+                            except Exception:
+                                pass
+                            if self.preposition_gains:
+                                try:
+                                    self.control.set_gains_all(*self.preposition_gains)
+                                except Exception:
+                                    pass
+                            try:
+                                self.control.move_absolute_pair(x_deg=0, y_deg=0)
+                            except Exception:
+                                pass
+
+                        self.running = False
+                        break
+
+                    tracking_started = False
+                    tracking_phase = "PREPOSITIONING"
+                    settled_cycles = 0
+                    last_tracking_command = None
+                    last_display_command = None
+                    last_display_target_elapsed = None
+
+                loop_total_ms = (time.monotonic() - loop_start_monotonic) * 1000.0
+                if meas_mid_elapsed_sec is not None and command_send_elapsed_sec is not None:
+                    prev_meas_to_command_delay_sec = command_send_elapsed_sec - meas_mid_elapsed_sec
                 log_writer.writerow(
                     [
                         now_utc.isoformat(),
+                        f"{loop_start_monotonic:.6f}",
                         f"{continuous_elapsed_sec:.6f}",
                         f"{elapsed_sec:.6f}",
                         int(bool(sample["visible"])),
@@ -1318,82 +1481,26 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{x_traj_error:.6f}",
                         f"{y_traj_error:.6f}",
                         "" if capture_error is None else f"{capture_error:.6f}",
+                        f"{sgp4_live_eval_ms:.6f}",
+                        f"{sgp4_ideal_eval_ms:.6f}",
+                        f"{sgp4_command_eval_ms:.6f}",
+                        f"{spi_x_read_ms:.6f}",
+                        f"{spi_y_read_ms:.6f}",
+                        f"{spi_total_ms:.6f}",
+                        f"{control_snapshot_ms:.6f}",
+                        f"{command_send_ms:.6f}",
+                        f"{loop_total_ms:.6f}",
+                        f"{observed_loop_period_sec:.6f}",
+                        f"{target_lookahead_sec:.6f}",
+                        f"{used_meas_to_command_delay_sec:.6f}",
+                        "" if meas_x_elapsed_sec is None else f"{meas_x_elapsed_sec:.6f}",
+                        "" if meas_y_elapsed_sec is None else f"{meas_y_elapsed_sec:.6f}",
+                        "" if meas_mid_elapsed_sec is None else f"{meas_mid_elapsed_sec:.6f}",
+                        "" if command_send_elapsed_sec is None else f"{command_send_elapsed_sec:.6f}",
                         prepoint_status,
                     ]
                 )
                 log_file.flush()
-                last_raw_angles = (raw_x_angle, raw_y_angle)
-                last_display_command = (cmd_x_angle, cmd_y_angle)
-                last_display_target_elapsed = target_elapsed_sec
-
-                if sample["visible"]:
-                    was_visible = True
-                    prepointed = False
-
-                if should_track_now or sample["visible"]:
-                    if not self.running or sat_index != self.current_sat_index:
-                        break
-
-                    if self.control:
-                        if should_track_now:
-                            if enter_tracking_now and self.tracking_gains:
-                                try:
-                                    self.control.set_gains_all(*self.tracking_gains)
-                                except Exception:
-                                    pass
-                            update_odrive_axes_with_velocity(
-                                cmd_x_angle,
-                                cmd_y_angle,
-                                cmd_x_vel_ff,
-                                cmd_y_vel_ff,
-                                self.control,
-                            )
-                            last_tracking_command = (cmd_x_angle, cmd_y_angle)
-                            if enter_tracking_now:
-                                tracking_phase = "TRACKING"
-                                tracking_started = True
-                            self.update_error_plot(continuous_elapsed_sec, x_traj_error, y_traj_error)
-                        else:
-                            update_odrive_axes(x_angle, y_angle, self.control)
-                            last_tracking_command = None
-                    if not tracking_started and sample["visible"]:
-                        prepoint_status = "Catching up to track"
-                else:
-                    if not self.running or sat_index != self.current_sat_index:
-                        break
-
-                    if prepointed and self.control:
-                        update_odrive_axes(x_angle, y_angle, self.control)
-                    last_tracking_command = None
-                    last_display_command = None
-                    last_display_target_elapsed = None
-
-                    if was_visible:
-                        if self.control:
-                            try:
-                                self.control.exit_tracking_mode_all()
-                            except Exception:
-                                pass
-                            if self.preposition_gains:
-                                try:
-                                    self.control.set_gains_all(*self.preposition_gains)
-                                except Exception:
-                                    pass
-                            try:
-                                self.control.move_absolute_pair(x_deg=0, y_deg=0)
-                            except Exception:
-                                pass
-
-                        self.running = False
-                        break
-
-                    tracking_started = False
-                    tracking_phase = "PREPOSITIONING"
-                    settled_cycles = 0
-                    last_tracking_command = None
-                    last_display_command = None
-                    last_display_target_elapsed = None
-
                 time.sleep(self.track_command_interval_sec)
         finally:
             try:
