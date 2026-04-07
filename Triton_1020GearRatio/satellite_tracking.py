@@ -32,6 +32,8 @@ TRACK_USE_PASSTHROUGH = True
 TRACK_USE_TIME_SPLIT = False
 TRACK_MAX_DEGREE = 91.0
 TRACK_MIN_DEGREE = -91.0
+TRACK_SPI_POSITION_CORRECTION_GAIN_X = 0.4
+TRACK_SPI_POSITION_CORRECTION_GAIN_Y = 0.6
 
 
 def get_local_timezone():
@@ -1003,6 +1005,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "raw_y_angle_deg",
                 "cmd_x_angle_deg",
                 "cmd_y_angle_deg",
+                "cmd_x_correction_deg",
+                "cmd_y_correction_deg",
+                "cmd_x_sent_deg",
+                "cmd_y_sent_deg",
                 "raw_dx_deg",
                 "raw_dy_deg",
                 "cmd_dx_deg",
@@ -1185,6 +1191,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
                 cmd_x_angle = x_angle
                 cmd_y_angle = y_angle
+                cmd_x_correction = 0.0
+                cmd_y_correction = 0.0
+                cmd_x_sent = cmd_x_angle
+                cmd_y_sent = cmd_y_angle
                 raw_dx = 0.0 if last_raw_angles is None else raw_x_angle - last_raw_angles[0]
                 raw_dy = 0.0 if last_raw_angles is None else raw_y_angle - last_raw_angles[1]
                 cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
@@ -1319,6 +1329,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         if not sample["visible"]:
                             prepoint_status = "Below-horizon pickup"
 
+                if should_track_now and x_actual is not None and y_actual is not None:
+                    cmd_x_correction = TRACK_SPI_POSITION_CORRECTION_GAIN_X * x_traj_error
+                    cmd_y_correction = TRACK_SPI_POSITION_CORRECTION_GAIN_Y * y_traj_error
+                    cmd_x_sent, cmd_y_sent = clamp_tracking_angles(
+                        cmd_x_angle + cmd_x_correction,
+                        cmd_y_angle + cmd_y_correction,
+                    )
+
                 displayed_tracking_started = int(bool(tracking_phase == "TRACKING" or enter_tracking_now))
 
                 self.set_output_text(
@@ -1348,6 +1366,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             f"Y Cmd Error: {y_error:.3f}",
                             f"X Traj Error: {x_traj_error:.3f}",
                             f"Y Traj Error: {y_traj_error:.3f}",
+                            f"X Corr: {cmd_x_correction:.3f}",
+                            f"Y Corr: {cmd_y_correction:.3f}",
                             prepoint_status,
                         ]
                     )
@@ -1373,8 +1393,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                     pass
                             command_send_start = time.monotonic()
                             update_odrive_axes_with_velocity(
-                                cmd_x_angle,
-                                cmd_y_angle,
+                                cmd_x_sent,
+                                cmd_y_sent,
                                 cmd_x_vel_ff,
                                 cmd_y_vel_ff,
                                 self.control,
@@ -1382,7 +1402,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             command_send_done = time.monotonic()
                             command_send_ms = (command_send_done - command_send_start) * 1000.0
                             command_send_elapsed_sec = command_send_done - tracking_start_monotonic
-                            last_tracking_command = (cmd_x_angle, cmd_y_angle)
+                            last_tracking_command = (cmd_x_sent, cmd_y_sent)
                             if enter_tracking_now:
                                 tracking_phase = "TRACKING"
                                 tracking_started = True
@@ -1452,6 +1472,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{raw_y_angle:.6f}",
                         f"{cmd_x_angle:.6f}",
                         f"{cmd_y_angle:.6f}",
+                        f"{cmd_x_correction:.6f}",
+                        f"{cmd_y_correction:.6f}",
+                        f"{cmd_x_sent:.6f}",
+                        f"{cmd_y_sent:.6f}",
                         f"{raw_dx:.6f}",
                         f"{raw_dy:.6f}",
                         f"{cmd_dx:.6f}",
