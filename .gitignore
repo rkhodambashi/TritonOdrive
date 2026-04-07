@@ -1,3 +1,6 @@
 Triton_1020GearRatio/tracking_logs/
 __pycache__/
 *.pyc
+Triton_1020GearRatio/__pycache__/
+Triton_1020GearRatio/__pycache__/OdrivePro_ACL60250_Motors_PositionInput.cpython-314.pyc
+Triton_1020GearRatio/__pycache__/satellite_tracking.cpython-314.pyc

@@ -873,8 +873,6 @@ class SatelliteTrackingWindow(tk.Toplevel):
             messagebox.showerror("Error", "Load TLE first")
             return
 
-        self.refresh_satellite_display()
-
         sel = self.sat_combobox.current()
 
         if sel < 0:
@@ -901,6 +899,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.current_sat_index = sat_index
         self.running = True
         self.reset_error_plot()
+        sat = self.satellites[sat_index]
+        self.set_output_text(
+            self.format_output_columns(
+                [
+                    f"Satellite: {sat.name}",
+                    "Status: Starting tracking...",
+                    "Rise ETA: calculating...",
+                    "Rise Local: calculating...",
+                    "AZ: -",
+                    "EL: -",
+                    "Raw X: -",
+                    "Raw Y: -",
+                    "X Angle: -",
+                    "Y Angle: -",
+                    "X Actual: -",
+                    "Y Actual: -",
+                    "X Cmd Error: -",
+                    "Y Cmd Error: -",
+                    "X Traj Error: -",
+                    "Y Traj Error: -",
+                ]
+            )
+        )
 
         self.tracking_thread = threading.Thread(
             target=self.track_satellite_loop,
@@ -937,6 +958,28 @@ class SatelliteTrackingWindow(tk.Toplevel):
         ts = load.timescale()
         observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon)
         sat = self.satellites[sat_index]
+        self.set_output_text(
+            self.format_output_columns(
+                [
+                    f"Satellite: {sat.name}",
+                    "Status: Computing next pass...",
+                    "Rise ETA: calculating...",
+                    "Rise Local: calculating...",
+                    "AZ: -",
+                    "EL: -",
+                    "Raw X: -",
+                    "Raw Y: -",
+                    "X Angle: -",
+                    "Y Angle: -",
+                    "X Actual: -",
+                    "Y Actual: -",
+                    "X Cmd Error: -",
+                    "Y Cmd Error: -",
+                    "X Traj Error: -",
+                    "Y Traj Error: -",
+                ]
+            )
+        )
         log_dir = Path(__file__).resolve().parent / "tracking_logs"
         log_dir.mkdir(exist_ok=True)
         safe_sat_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in sat.name).strip("_") or "satellite"
