@@ -33,7 +33,7 @@ TRACK_USE_TIME_SPLIT = False
 TRACK_MAX_DEGREE = 91.0
 TRACK_MIN_DEGREE = -91.0
 TRACK_SPI_POSITION_CORRECTION_GAIN_X = 0.4
-TRACK_SPI_POSITION_CORRECTION_GAIN_Y = 0.6
+TRACK_SPI_POSITION_CORRECTION_GAIN_Y = 1.6
 
 
 def get_local_timezone():
@@ -382,6 +382,90 @@ def sample_tracking_state_utc(ts, observer, sat, sample_time_utc, derivative_dt_
     return current
 
 
+def load_replay_reference_csv(file_path):
+    samples = []
+    with open(file_path, newline="", encoding="utf-8") as replay_file:
+        reader = csv.DictReader(replay_file)
+        for row in reader:
+            try:
+                samples.append(
+                    {
+                        "elapsed_sec": float(row["elapsed_sec"]),
+                        "visible": bool(int(row["sample_visible"])),
+                        "tracking_started": bool(int(row.get("tracking_started", "0"))),
+                        "az_deg": float(row["az_deg"]),
+                        "el_deg": float(row["el_deg"]),
+                        "raw_x_angle": float(row["raw_x_angle_deg"]),
+                        "raw_y_angle": float(row["raw_y_angle_deg"]),
+                        "x_angle": float(row["cmd_x_angle_deg"]),
+                        "y_angle": float(row["cmd_y_angle_deg"]),
+                        "x_vel": float(row["cmd_x_vel_ff_deg_per_s"]),
+                        "y_vel": float(row["cmd_y_vel_ff_deg_per_s"]),
+                        "x_acc": float(row["x_acc_deg_per_s2"]),
+                        "y_acc": float(row["y_acc_deg_per_s2"]),
+                        "status": row.get("status", ""),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    samples.sort(key=lambda sample: sample["elapsed_sec"])
+    # Trim any obviously invalid terminal jump that was captured in the source log.
+    while len(samples) >= 2:
+        previous = samples[-2]
+        current = samples[-1]
+        if (
+            abs(current["x_angle"] - previous["x_angle"]) > 30.0
+            or abs(current["y_angle"] - previous["y_angle"]) > 30.0
+        ):
+            samples.pop()
+            continue
+        break
+    return samples
+
+
+def sample_replay_tracking_state(samples, elapsed_sec):
+    if not samples:
+        return None
+
+    if elapsed_sec <= samples[0]["elapsed_sec"]:
+        return dict(samples[0])
+
+    if elapsed_sec >= samples[-1]["elapsed_sec"]:
+        return None
+
+    left = samples[0]
+    right = samples[-1]
+    for candidate_left, candidate_right in zip(samples, samples[1:]):
+        if candidate_left["elapsed_sec"] <= elapsed_sec <= candidate_right["elapsed_sec"]:
+            left = candidate_left
+            right = candidate_right
+            break
+
+    span = max(1e-9, right["elapsed_sec"] - left["elapsed_sec"])
+    alpha = max(0.0, min(1.0, (elapsed_sec - left["elapsed_sec"]) / span))
+
+    def lerp(field):
+        return left[field] + (right[field] - left[field]) * alpha
+
+    return {
+        "elapsed_sec": elapsed_sec,
+        "visible": left["visible"] if alpha < 0.5 else right["visible"],
+        "tracking_started": left["tracking_started"] if alpha < 0.5 else right["tracking_started"],
+        "az_deg": lerp("az_deg"),
+        "el_deg": lerp("el_deg"),
+        "raw_x_angle": lerp("raw_x_angle"),
+        "raw_y_angle": lerp("raw_y_angle"),
+        "x_angle": lerp("x_angle"),
+        "y_angle": lerp("y_angle"),
+        "x_vel": lerp("x_vel"),
+        "y_vel": lerp("y_vel"),
+        "x_acc": lerp("x_acc"),
+        "y_acc": lerp("y_acc"),
+        "status": left["status"] if alpha < 0.5 else right["status"],
+    }
+
+
 def sample_limited_tracking_target_continuous(
     ts,
     observer,
@@ -535,6 +619,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.satellites = []
         self.display_map = []
         self.satellite_labels = []
+        self.reference_mode_var = tk.StringVar(value="live")
+        self.replay_path = None
+        self.replay_samples = []
 
         top_frame = ttk.Frame(self)
         top_frame.pack(fill="x", padx=10, pady=8)
@@ -575,8 +662,24 @@ class SatelliteTrackingWindow(tk.Toplevel):
             row=2, column=1, sticky="e", padx=5, pady=(8, 2)
         )
 
+        ttk.Label(tle_frame, text="Reference Source:").grid(row=4, column=0, sticky="w", padx=5, pady=(8, 2))
+        self.reference_mode_combo = ttk.Combobox(
+            tle_frame,
+            state="readonly",
+            width=18,
+            values=("live", "replay"),
+            textvariable=self.reference_mode_var,
+        )
+        self.reference_mode_combo.grid(row=4, column=1, sticky="w", padx=5, pady=(8, 2))
+
+        ttk.Button(tle_frame, text="Replay File", command=self.load_replay_file).grid(
+            row=5, column=0, sticky="w", padx=5, pady=(2, 2)
+        )
+        self.replay_file_label = ttk.Label(tle_frame, text="No replay file selected")
+        self.replay_file_label.grid(row=5, column=1, sticky="ew", padx=5, pady=(2, 2))
+
         button_row = ttk.Frame(tle_frame)
-        button_row.grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=8)
+        button_row.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=8)
         ttk.Button(button_row, text="Start Tracking", command=self.start_tracking_thread).pack(side="left", padx=(0, 8))
         ttk.Button(button_row, text="Stop Tracking / Stow", command=self.stop_tracking).pack(side="left")
 
@@ -803,6 +906,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         messagebox.showinfo("TLE Loaded", f"{len(self.satellites)} satellites loaded")
 
+    def load_replay_file(self):
+        default_dir = Path(__file__).resolve().parent / "tracking_replays"
+        file_path = filedialog.askopenfilename(
+            initialdir=str(default_dir),
+            filetypes=[("Replay CSV Files", "*.csv"), ("All Files", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            replay_samples = load_replay_reference_csv(file_path)
+            if not replay_samples:
+                raise ValueError("Replay file does not contain any usable samples.")
+        except Exception as exc:
+            messagebox.showerror("Replay Load Error", str(exc))
+            return
+
+        self.replay_path = file_path
+        self.replay_samples = replay_samples
+        self.replay_file_label.config(text=file_path)
+        self.reference_mode_var.set("replay")
+        messagebox.showinfo("Replay Loaded", f"Loaded {len(replay_samples)} replay samples.")
+
     def refresh_satellite_display(self):
         if not self.satellites:
             return
@@ -871,17 +997,30 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.sat_combobox.current(0)
 
     def start_tracking_thread(self):
-        if not self.satellites:
-            messagebox.showerror("Error", "Load TLE first")
-            return
+        reference_mode = self.reference_mode_var.get()
+        replay_mode = reference_mode == "replay"
+        sat_index = None
+        sat_label = "Replay"
 
-        sel = self.sat_combobox.current()
+        if replay_mode:
+            if not self.replay_samples:
+                messagebox.showerror("Error", "Load a replay CSV first")
+                return
+            replay_path = Path(self.replay_path) if self.replay_path else None
+            sat_label = replay_path.stem.replace("_reference", "") if replay_path else "Replay"
+        else:
+            if not self.satellites:
+                messagebox.showerror("Error", "Load TLE first")
+                return
 
-        if sel < 0:
-            messagebox.showerror("Error", "Select satellite")
-            return
+            sel = self.sat_combobox.current()
 
-        sat_index = self.display_map[sel]
+            if sel < 0:
+                messagebox.showerror("Error", "Select satellite")
+                return
+
+            sat_index = self.display_map[sel]
+            sat_label = self.satellites[sat_index].name
 
         if self.running:
             if sat_index == self.current_sat_index:
@@ -901,11 +1040,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.current_sat_index = sat_index
         self.running = True
         self.reset_error_plot()
-        sat = self.satellites[sat_index]
         self.set_output_text(
             self.format_output_columns(
                 [
-                    f"Satellite: {sat.name}",
+                    f"Satellite: {sat_label}",
                     "Status: Starting tracking...",
                     "Rise ETA: calculating...",
                     "Rise Local: calculating...",
@@ -957,13 +1095,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.tracking_thread = None
 
     def track_satellite_loop(self, sat_index):
-        ts = load.timescale()
-        observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon)
-        sat = self.satellites[sat_index]
+        reference_mode = self.reference_mode_var.get()
+        replay_mode = reference_mode == "replay"
+        ts = load.timescale() if not replay_mode else None
+        observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon) if not replay_mode else None
+        sat = self.satellites[sat_index] if not replay_mode else None
+        replay_samples = list(self.replay_samples) if replay_mode else None
+        sat_name = sat.name if sat is not None else (Path(self.replay_path).stem.replace("_reference", "") if self.replay_path else "Replay")
         self.set_output_text(
             self.format_output_columns(
                 [
-                    f"Satellite: {sat.name}",
+                    f"Satellite: {sat_name}",
                     "Status: Computing next pass...",
                     "Rise ETA: calculating...",
                     "Rise Local: calculating...",
@@ -984,10 +1126,16 @@ class SatelliteTrackingWindow(tk.Toplevel):
         )
         log_dir = Path(__file__).resolve().parent / "tracking_logs"
         log_dir.mkdir(exist_ok=True)
-        safe_sat_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in sat.name).strip("_") or "satellite"
-        log_path = log_dir / f"{safe_sat_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        replay_dir = Path(__file__).resolve().parent / "tracking_replays"
+        replay_dir.mkdir(exist_ok=True)
+        safe_sat_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in sat_name).strip("_") or "satellite"
+        run_timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_path = log_dir / f"{safe_sat_name}_{run_timestamp}.csv"
+        replay_path = replay_dir / f"{safe_sat_name}_{run_timestamp}_reference.csv"
         log_file = open(log_path, "w", newline="", encoding="utf-8")
         log_writer = csv.writer(log_file)
+        replay_file = open(replay_path, "w", newline="", encoding="utf-8")
+        replay_writer = csv.writer(replay_file)
         log_writer.writerow(
             [
                 "utc_time",
@@ -1057,6 +1205,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "status",
             ]
         )
+        replay_writer.writerow(
+            [
+                "utc_time",
+                "elapsed_sec",
+                "sample_visible",
+                "tracking_started",
+                "target_elapsed_sec",
+                "ideal_target_elapsed_sec",
+                "az_deg",
+                "el_deg",
+                "raw_x_angle_deg",
+                "raw_y_angle_deg",
+                "cmd_x_angle_deg",
+                "cmd_y_angle_deg",
+                "x_vel_deg_per_s",
+                "y_vel_deg_per_s",
+                "x_acc_deg_per_s2",
+                "y_acc_deg_per_s2",
+                "cmd_x_vel_ff_deg_per_s",
+                "cmd_y_vel_ff_deg_per_s",
+                "status",
+            ]
+        )
         was_visible = False
         tracking_started = False
         tracking_phase = "PREPOSITIONING"
@@ -1067,9 +1238,33 @@ class SatelliteTrackingWindow(tk.Toplevel):
         last_display_command = None
         last_loop_start_monotonic = None
         prev_meas_to_command_delay_sec = self.track_command_interval_sec
-        next_rise_utc = get_next_rise_time(ts, observer, sat)
+        next_rise_utc = None if replay_mode else get_next_rise_time(ts, observer, sat)
         prepointed = False
         tracking_start_monotonic = time.monotonic()
+        replay_end_elapsed_sec = replay_samples[-1]["elapsed_sec"] if replay_mode and replay_samples else None
+        replay_ended = False
+
+        def stow_axes():
+            if not self.control:
+                return
+            try:
+                self.control.exit_tracking_mode_all()
+            except Exception:
+                pass
+            if self.preposition_gains:
+                try:
+                    self.control.set_gains_all(*self.preposition_gains)
+                except Exception:
+                    pass
+            try:
+                self.control.move_absolute_pair(x_deg=0, y_deg=0)
+            except Exception:
+                pass
+
+        def sample_reference(sample_elapsed_sec, sample_time_utc, derivative_dt_sec):
+            if replay_mode:
+                return sample_replay_tracking_state(replay_samples, sample_elapsed_sec)
+            return sample_tracking_state_utc(ts, observer, sat, sample_time_utc, derivative_dt_sec)
 
         if self.control and self.preposition_gains:
             try:
@@ -1111,10 +1306,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 derivative_dt = min(self.track_command_interval_sec, self.trajectory_point_spacing_sec)
                 elapsed_sec = continuous_elapsed_sec
+                if replay_mode and replay_end_elapsed_sec is not None and continuous_elapsed_sec > replay_end_elapsed_sec:
+                    stow_axes()
+                    replay_ended = True
+                    self.running = False
+                    break
                 sgp4_live_start = time.monotonic()
-                live_sample = sample_tracking_state_utc(ts, observer, sat, now_utc, derivative_dt)
+                live_sample = sample_reference(continuous_elapsed_sec, now_utc, derivative_dt)
                 sgp4_live_eval_ms = (time.monotonic() - sgp4_live_start) * 1000.0
                 if live_sample is None:
+                    if replay_mode:
+                        stow_axes()
+                        replay_ended = True
+                        self.running = False
+                        break
                     time.sleep(self.track_command_interval_sec)
                     continue
                 sample = live_sample
@@ -1124,7 +1329,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 rise_local_text = "Rise Local: -"
                 pickup_window_active = False
                 prepoint_target_sample = None
-                if next_rise_utc and not was_visible:
+                if replay_mode:
+                    rise_eta_text = "Rise ETA: replay"
+                    rise_local_text = "Rise Local: replay"
+                    prepoint_status = "Replay reference"
+                elif next_rise_utc and not was_visible:
                     seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
                     if seconds_to_rise > 0:
                         rise_eta_text = f"Rise ETA: {seconds_to_rise:.1f} s"
@@ -1145,8 +1354,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 az_deg = sample["az_deg"]
                 el_deg = sample["el_deg"]
-                raw_x_angle = sample["x_angle"]
-                raw_y_angle = sample["y_angle"]
+                raw_x_angle = sample.get("raw_x_angle", sample["x_angle"])
+                raw_y_angle = sample.get("raw_y_angle", sample["y_angle"])
                 x_angle = raw_x_angle
                 y_angle = raw_y_angle
                 x_vel = sample.get("x_vel", 0.0)
@@ -1161,25 +1370,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
                     target_elapsed_sec = ideal_target_elapsed_sec
                     sgp4_command_start = time.monotonic()
-                    if tracking_started and TRACK_USE_TIME_SPLIT:
-                        command_sample = sample_tracking_state_utc(
-                            ts,
-                            observer,
-                            sat,
-                            now_utc + datetime.timedelta(seconds=target_lookahead_sec),
-                            derivative_dt,
-                        )
-                    else:
-                        command_sample = sample_tracking_state_utc(
-                            ts,
-                            observer,
-                            sat,
-                            now_utc + datetime.timedelta(seconds=target_lookahead_sec),
-                            derivative_dt,
-                        )
+                    command_sample = sample_reference(
+                        continuous_elapsed_sec + target_lookahead_sec,
+                        now_utc + datetime.timedelta(seconds=target_lookahead_sec),
+                        derivative_dt,
+                    )
                     sgp4_command_eval_ms = (time.monotonic() - sgp4_command_start) * 1000.0
 
                 if command_sample is None:
+                    if replay_mode:
+                        stow_axes()
+                        replay_ended = True
+                        self.running = False
+                        break
                     time.sleep(self.track_command_interval_sec)
                     continue
 
@@ -1252,17 +1455,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         x_error = cmd_x_angle - x_actual
                         y_error = cmd_y_angle - y_actual
                         sgp4_ideal_start = time.monotonic()
-                        x_ideal_sample = sample_tracking_state_utc(
-                            ts,
-                            observer,
-                            sat,
+                        x_ideal_sample = sample_reference(
+                            meas_x_elapsed_sec,
                             now_utc + datetime.timedelta(seconds=meas_x_elapsed_sec - continuous_elapsed_sec),
                             derivative_dt,
                         )
-                        y_ideal_sample = sample_tracking_state_utc(
-                            ts,
-                            observer,
-                            sat,
+                        y_ideal_sample = sample_reference(
+                            meas_y_elapsed_sec,
                             now_utc + datetime.timedelta(seconds=meas_y_elapsed_sec - continuous_elapsed_sec),
                             derivative_dt,
                         )
@@ -1304,10 +1503,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 if should_track_now:
                     ideal_target_elapsed_sec = continuous_elapsed_sec + target_lookahead_sec
                     target_elapsed_sec = ideal_target_elapsed_sec
-                    tracking_command_sample = sample_tracking_state_utc(
-                        ts,
-                        observer,
-                        sat,
+                    tracking_command_sample = sample_reference(
+                        continuous_elapsed_sec + target_lookahead_sec,
                         now_utc + datetime.timedelta(seconds=target_lookahead_sec),
                         derivative_dt,
                     )
@@ -1342,7 +1539,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.set_output_text(
                     self.format_output_columns(
                         [
-                            f"Satellite: {sat.name}",
+                            f"Satellite: {sat_name}",
                             f"AZ: {az_deg:.3f}",
                             f"EL: {el_deg:.3f}",
                             f"Raw X: {raw_x_angle:.3f}",
@@ -1427,21 +1624,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     last_display_target_elapsed = None
 
                     if was_visible:
-                        if self.control:
-                            try:
-                                self.control.exit_tracking_mode_all()
-                            except Exception:
-                                pass
-                            if self.preposition_gains:
-                                try:
-                                    self.control.set_gains_all(*self.preposition_gains)
-                                except Exception:
-                                    pass
-                            try:
-                                self.control.move_absolute_pair(x_deg=0, y_deg=0)
-                            except Exception:
-                                pass
-
+                        stow_axes()
                         self.running = False
                         break
 
@@ -1455,6 +1638,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 loop_total_ms = (time.monotonic() - loop_start_monotonic) * 1000.0
                 if meas_mid_elapsed_sec is not None and command_send_elapsed_sec is not None:
                     prev_meas_to_command_delay_sec = command_send_elapsed_sec - meas_mid_elapsed_sec
+                if replay_ended:
+                    break
+
                 log_writer.writerow(
                     [
                         now_utc.isoformat(),
@@ -1524,11 +1710,39 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         prepoint_status,
                     ]
                 )
+                replay_writer.writerow(
+                    [
+                        now_utc.isoformat(),
+                        f"{continuous_elapsed_sec:.6f}",
+                        int(bool(sample["visible"])),
+                        displayed_tracking_started,
+                        f"{target_elapsed_sec:.6f}",
+                        f"{ideal_target_elapsed_sec:.6f}",
+                        f"{az_deg:.6f}",
+                        f"{el_deg:.6f}",
+                        f"{raw_x_angle:.6f}",
+                        f"{raw_y_angle:.6f}",
+                        f"{cmd_x_angle:.6f}",
+                        f"{cmd_y_angle:.6f}",
+                        f"{x_vel:.6f}",
+                        f"{y_vel:.6f}",
+                        f"{x_acc:.6f}",
+                        f"{y_acc:.6f}",
+                        f"{cmd_x_vel_ff:.6f}",
+                        f"{cmd_y_vel_ff:.6f}",
+                        prepoint_status,
+                    ]
+                )
                 log_file.flush()
+                replay_file.flush()
                 time.sleep(self.track_command_interval_sec)
         finally:
             try:
                 log_file.close()
+            except Exception:
+                pass
+            try:
+                replay_file.close()
             except Exception:
                 pass
             if self.control:
