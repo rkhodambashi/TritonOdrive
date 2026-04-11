@@ -77,6 +77,8 @@ def connect_odrive():
         )
         refresh_config_entries()
         update_position_loop()
+    except TimeoutError as e:
+        status_label.config(text=f"Initialization timeout: {e}")
     except Exception as e:
         status_label.config(text=f"Connection Failed: {e}")
 
@@ -602,12 +604,12 @@ ttk.Button(gains_frame, text="Apply Preposition Gains", command=apply_gains).gri
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=1, column=2, padx=10)
 pos_gain_entry_small = ttk.Entry(gains_frame, width=8)
-pos_gain_entry_small.insert(0, "1")
+pos_gain_entry_small.insert(0, "2")
 pos_gain_entry_small.grid(row=1, column=3)
 
 ttk.Label(gains_frame, text="Velocity Gain").grid(row=2, column=2)
 vel_gain_entry_small = ttk.Entry(gains_frame, width=8)
-vel_gain_entry_small.insert(0, "0.3")
+vel_gain_entry_small.insert(0, "0.2")
 vel_gain_entry_small.grid(row=2, column=3)
 
 ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=3, column=2)

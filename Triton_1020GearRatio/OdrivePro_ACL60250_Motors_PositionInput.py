@@ -7,6 +7,8 @@ import odrive
 GEAR_RATIO = 1240.0
 POSITION_TOL = 0.005
 VELOCITY_TOL = 0.001
+SPI_POSITION_TOL_DEG = 0.05
+SETTLE_TIMEOUT_SEC = 20.0
 
 MAX_DEGREE = 90
 MIN_DEGREE = -90
@@ -225,15 +227,37 @@ def connect_all():
     return devices
 
 
-def wait_until_settled(target_motor_turns, axis="x"):
+def wait_until_settled(target_motor_turns, axis="x", target_output_deg=None):
     state = _get_state(axis)
+    output_sign = AXIS_CONFIG[axis]["output_sign"]
+    start_time = time.monotonic()
     while True:
+        if time.monotonic() - start_time > SETTLE_TIMEOUT_SEC:
+            raise TimeoutError(f"{axis.upper()} axis failed to settle within {SETTLE_TIMEOUT_SEC:.1f} s")
+
+        active_errors = state["odrive"].axis0.active_errors
+        disarm_reason = state["odrive"].axis0.disarm_reason
+        if active_errors or disarm_reason:
+            raise RuntimeError(
+                f"{axis.upper()} axis stopped during settle "
+                f"(active_errors={int(active_errors)}, disarm_reason={int(disarm_reason)})"
+            )
+
         motor_pos = state["odrive"].axis0.pos_vel_mapper.pos_rel
         motor_vel = state["odrive"].axis0.pos_vel_mapper.vel
         pos_error = abs(target_motor_turns - motor_pos)
         vel_abs = abs(motor_vel)
+        spi_pos_error = 0.0
 
-        if pos_error < POSITION_TOL and vel_abs < VELOCITY_TOL:
+        if target_output_deg is not None:
+            spi_pos = get_spi_position(axis)
+            spi_pos_error = abs(target_output_deg - spi_pos)
+
+        if (
+            pos_error < POSITION_TOL
+            and vel_abs < VELOCITY_TOL
+            and (target_output_deg is None or spi_pos_error < SPI_POSITION_TOL_DEG)
+        ):
             break
         time.sleep(0.001)
 
@@ -242,7 +266,7 @@ def go_home(axis="x"):
     state = _get_state(axis)
     state["odrive"].axis0.requested_state = 8
     state["odrive"].axis0.controller.input_pos = state["motor_home"]
-    wait_until_settled(state["motor_home"], axis=axis)
+    wait_until_settled(state["motor_home"], axis=axis, target_output_deg=0.0)
 
 
 def move_absolute(target_output_deg, axis="x"):
@@ -259,7 +283,7 @@ def move_absolute(target_output_deg, axis="x"):
 
     state["odrive"].axis0.requested_state = 8
     state["odrive"].axis0.controller.input_pos = target_motor_turns
-    wait_until_settled(target_motor_turns, axis=axis)
+    wait_until_settled(target_motor_turns, axis=axis, target_output_deg=target_output_deg)
 
 
 def command_absolute(target_output_deg, axis="x"):
@@ -372,13 +396,24 @@ def exit_tracking_mode(axis="x"):
 
 def _run_parallel(calls):
     threads = []
+    exceptions = []
+
+    def run_call(func, kwargs):
+        try:
+            func(**kwargs)
+        except Exception as exc:
+            exceptions.append(exc)
+
     for func, kwargs in calls:
-        thread = threading.Thread(target=func, kwargs=kwargs)
+        thread = threading.Thread(target=run_call, args=(func, kwargs))
         thread.start()
         threads.append(thread)
 
     for thread in threads:
         thread.join()
+
+    if exceptions:
+        raise exceptions[0]
 
 
 def go_home_all():

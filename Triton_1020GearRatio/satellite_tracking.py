@@ -32,8 +32,23 @@ TRACK_USE_PASSTHROUGH = True
 TRACK_USE_TIME_SPLIT = False
 TRACK_MAX_DEGREE = 91.0
 TRACK_MIN_DEGREE = -91.0
-TRACK_SPI_POSITION_CORRECTION_GAIN_X = 0.4
-TRACK_SPI_POSITION_CORRECTION_GAIN_Y = 1.6
+TRACK_VEL_FEEDFORWARD_SCALE_X = 1.0
+TRACK_VEL_FEEDFORWARD_SCALE_Y = 1.0
+TRACK_SPI_POSITION_CORRECTION_GAIN_X = 8.0
+TRACK_SPI_POSITION_CORRECTION_GAIN_Y = 8.0
+TRACK_SPI_INTEGRAL_GAIN_X = 2.0
+TRACK_SPI_INTEGRAL_GAIN_Y = 2.0
+TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG = 0.5
+TRACK_SPI_INTEGRAL_MAX_STATE_X = 10.0
+TRACK_SPI_INTEGRAL_MAX_STATE_Y = 10.0
+TRACK_SPI_INTEGRAL_MAX_CORRECTION_X = 10.0
+TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y = 10.0
+TRACK_SPI_DERIVATIVE_GAIN_X = 0.3
+TRACK_SPI_DERIVATIVE_GAIN_Y = 0.6
+TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X = 0.8
+TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y = 1.0
+TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X = 0.5
+TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y = 10.0
 
 
 def get_local_timezone():
@@ -612,9 +627,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.running = False
         self.tracking_thread = None
         self.current_sat_index = None
-        self.error_time = deque(maxlen=1200)
-        self.x_error_history = deque(maxlen=1200)
-        self.y_error_history = deque(maxlen=1200)
+        self.error_time = deque()
+        self.x_error_history = deque()
+        self.y_error_history = deque()
 
         self.satellites = []
         self.display_map = []
@@ -767,6 +782,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.error_ax_y.set_ylabel("Y Traj Error (deg)")
         self.x_error_line, = self.error_ax_x.plot([], [], label="X Traj Error")
         self.y_error_line, = self.error_ax_y.plot([], [], label="Y Traj Error", color="tab:orange")
+        self.error_ax_x.axhline(0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+        self.error_ax_x.axhline(-0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+        self.error_ax_y.axhline(0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+        self.error_ax_y.axhline(-0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+        self.error_ax_x.set_ylim(-0.1, 0.1)
+        self.error_ax_y.set_ylim(-0.1, 0.1)
         self.error_ax_x.legend(loc="upper right")
         self.error_ax_y.legend(loc="upper right")
         self.error_fig.tight_layout()
@@ -780,10 +801,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_error_history.clear()
         self.x_error_line.set_data([], [])
         self.y_error_line.set_data([], [])
-        self.error_ax_x.relim()
-        self.error_ax_x.autoscale_view()
-        self.error_ax_y.relim()
-        self.error_ax_y.autoscale_view()
+        self.error_ax_x.set_xlim(0, 1)
+        self.error_ax_y.set_xlim(0, 1)
+        self.error_ax_x.set_ylim(-0.1, 0.1)
+        self.error_ax_y.set_ylim(-0.1, 0.1)
         self.error_canvas.draw_idle()
 
     def set_output_text(self, text):
@@ -821,10 +842,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_error_history.append(y_error)
         self.x_error_line.set_data(list(self.error_time), list(self.x_error_history))
         self.y_error_line.set_data(list(self.error_time), list(self.y_error_history))
-        self.error_ax_x.relim()
-        self.error_ax_x.autoscale_view()
-        self.error_ax_y.relim()
-        self.error_ax_y.autoscale_view()
+        xmax = max(1.0, elapsed_sec)
+        self.error_ax_x.set_xlim(0, xmax)
+        self.error_ax_y.set_xlim(0, xmax)
+        self.error_ax_x.set_ylim(-0.1, 0.1)
+        self.error_ax_y.set_ylim(-0.1, 0.1)
         self.error_canvas.draw_idle()
 
     def apply_tracking_settings(self):
@@ -1153,6 +1175,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "raw_y_angle_deg",
                 "cmd_x_angle_deg",
                 "cmd_y_angle_deg",
+                "cmd_x_p_term_deg",
+                "cmd_y_p_term_deg",
+                "cmd_x_i_term_deg",
+                "cmd_y_i_term_deg",
+                "cmd_x_d_term_deg",
+                "cmd_y_d_term_deg",
+                "y_integral_unwind_applied",
+                "y_integral_state",
                 "cmd_x_correction_deg",
                 "cmd_y_correction_deg",
                 "cmd_x_sent_deg",
@@ -1219,6 +1249,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "raw_y_angle_deg",
                 "cmd_x_angle_deg",
                 "cmd_y_angle_deg",
+                "cmd_x_p_term_deg",
+                "cmd_y_p_term_deg",
+                "cmd_x_i_term_deg",
+                "cmd_y_i_term_deg",
+                "cmd_x_d_term_deg",
+                "cmd_y_d_term_deg",
+                "y_integral_unwind_applied",
+                "y_integral_state",
                 "x_vel_deg_per_s",
                 "y_vel_deg_per_s",
                 "x_acc_deg_per_s2",
@@ -1243,8 +1281,18 @@ class SatelliteTrackingWindow(tk.Toplevel):
         tracking_start_monotonic = time.monotonic()
         replay_end_elapsed_sec = replay_samples[-1]["elapsed_sec"] if replay_mode and replay_samples else None
         replay_ended = False
+        x_error_integral = 0.0
+        y_error_integral = 0.0
+        prev_y_ref_vel_for_unwind = None
+        prev_x_traj_error_for_d = None
+        prev_y_traj_error_for_d = None
+        x_error_derivative_filtered = 0.0
+        y_error_derivative_filtered = 0.0
 
         def stow_axes():
+            nonlocal x_error_integral, y_error_integral, prev_y_ref_vel_for_unwind
+            nonlocal prev_x_traj_error_for_d, prev_y_traj_error_for_d
+            nonlocal x_error_derivative_filtered, y_error_derivative_filtered
             if not self.control:
                 return
             try:
@@ -1260,6 +1308,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.control.move_absolute_pair(x_deg=0, y_deg=0)
             except Exception:
                 pass
+            x_error_integral = 0.0
+            y_error_integral = 0.0
+            prev_y_ref_vel_for_unwind = None
+            prev_x_traj_error_for_d = None
+            prev_y_traj_error_for_d = None
+            x_error_derivative_filtered = 0.0
+            y_error_derivative_filtered = 0.0
 
         def sample_reference(sample_elapsed_sec, sample_time_utc, derivative_dt_sec):
             if replay_mode:
@@ -1388,12 +1443,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 x_angle = command_sample["x_angle"]
                 y_angle = command_sample["y_angle"]
-                cmd_x_vel_ff = command_sample.get("x_vel", x_vel)
-                cmd_y_vel_ff = command_sample.get("y_vel", y_vel)
+                cmd_x_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_X * command_sample.get("x_vel", x_vel)
+                cmd_y_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_Y * command_sample.get("y_vel", y_vel)
 
                 x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
                 cmd_x_angle = x_angle
                 cmd_y_angle = y_angle
+                cmd_x_p_term = 0.0
+                cmd_y_p_term = 0.0
+                cmd_x_i_term = 0.0
+                cmd_y_i_term = 0.0
+                cmd_x_d_term = 0.0
+                cmd_y_d_term = 0.0
+                y_integral_unwind_applied = 0
                 cmd_x_correction = 0.0
                 cmd_y_correction = 0.0
                 cmd_x_sent = cmd_x_angle
@@ -1495,6 +1557,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 should_track_now = track_gate_open and (tracking_phase == "TRACKING" or enter_tracking_now)
 
                 if TRACK_USE_PASSTHROUGH and enter_tracking_now and self.control:
+                    x_error_integral = 0.0
+                    y_error_integral = 0.0
+                    prev_y_ref_vel_for_unwind = None
+                    prev_x_traj_error_for_d = None
+                    prev_y_traj_error_for_d = None
+                    x_error_derivative_filtered = 0.0
+                    y_error_derivative_filtered = 0.0
                     try:
                         self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
                     except Exception:
@@ -1517,8 +1586,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         cmd_y_angle = y_angle
                         cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
                         cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
-                        cmd_x_vel_ff = command_sample.get("x_vel", cmd_x_vel_ff)
-                        cmd_y_vel_ff = command_sample.get("y_vel", cmd_y_vel_ff)
+                        cmd_x_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_X * command_sample.get("x_vel", cmd_x_vel_ff)
+                        cmd_y_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_Y * command_sample.get("y_vel", cmd_y_vel_ff)
                         if x_actual is not None and y_actual is not None:
                             x_error = cmd_x_angle - x_actual
                             y_error = cmd_y_angle - y_actual
@@ -1527,12 +1596,80 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             prepoint_status = "Below-horizon pickup"
 
                 if should_track_now and x_actual is not None and y_actual is not None:
-                    cmd_x_correction = TRACK_SPI_POSITION_CORRECTION_GAIN_X * x_traj_error
-                    cmd_y_correction = TRACK_SPI_POSITION_CORRECTION_GAIN_Y * y_traj_error
+                    cmd_x_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_X * x_traj_error
+                    cmd_y_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_Y * y_traj_error
+                    if abs(x_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
+                        x_error_integral += x_traj_error * observed_loop_period_sec
+                        x_error_integral = max(
+                            -TRACK_SPI_INTEGRAL_MAX_STATE_X,
+                            min(TRACK_SPI_INTEGRAL_MAX_STATE_X, x_error_integral),
+                        )
+                    cmd_x_i_term = TRACK_SPI_INTEGRAL_GAIN_X * x_error_integral
+                    cmd_x_i_term = max(
+                        -TRACK_SPI_INTEGRAL_MAX_CORRECTION_X,
+                        min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_X, cmd_x_i_term),
+                    )
+                    if abs(y_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
+                        y_error_integral += y_traj_error * observed_loop_period_sec
+                        y_error_integral = max(
+                            -TRACK_SPI_INTEGRAL_MAX_STATE_Y,
+                            min(TRACK_SPI_INTEGRAL_MAX_STATE_Y, y_error_integral),
+                        )
+                    cmd_y_i_term = TRACK_SPI_INTEGRAL_GAIN_Y * y_error_integral
+                    cmd_y_i_term = max(
+                        -TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y,
+                        min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y, cmd_y_i_term),
+                    )
+                    if prev_x_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                        x_error_derivative_filtered = 0.0
+                    else:
+                        x_error_derivative_raw = (x_traj_error - prev_x_traj_error_for_d) / observed_loop_period_sec
+                        x_error_derivative_filtered = (
+                            TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X * x_error_derivative_filtered
+                            + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X) * x_error_derivative_raw
+                        )
+                    cmd_x_d_term = TRACK_SPI_DERIVATIVE_GAIN_X * x_error_derivative_filtered
+                    cmd_x_d_term = max(
+                        -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X,
+                        min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X, cmd_x_d_term),
+                    )
+                    if prev_y_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                        y_error_derivative_filtered = 0.0
+                    else:
+                        y_error_derivative_raw = (y_traj_error - prev_y_traj_error_for_d) / observed_loop_period_sec
+                        y_error_derivative_filtered = (
+                            TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y * y_error_derivative_filtered
+                            + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y) * y_error_derivative_raw
+                        )
+                    cmd_y_d_term = TRACK_SPI_DERIVATIVE_GAIN_Y * y_error_derivative_filtered
+                    cmd_y_d_term = max(
+                        -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y,
+                        min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y, cmd_y_d_term),
+                    )
+                    prev_x_traj_error_for_d = x_traj_error
+                    prev_y_traj_error_for_d = y_traj_error
+                    prev_y_ref_vel_for_unwind = cmd_y_vel_ff
+                    cmd_x_correction = cmd_x_p_term + cmd_x_i_term + cmd_x_d_term
+                    cmd_y_correction = cmd_y_p_term + cmd_y_i_term + cmd_y_d_term
                     cmd_x_sent, cmd_y_sent = clamp_tracking_angles(
                         cmd_x_angle + cmd_x_correction,
                         cmd_y_angle + cmd_y_correction,
                     )
+                else:
+                    cmd_x_p_term = 0.0
+                    cmd_y_p_term = 0.0
+                    cmd_x_i_term = 0.0
+                    cmd_y_i_term = 0.0
+                    cmd_x_d_term = 0.0
+                    cmd_y_d_term = 0.0
+                    if tracking_phase != "TRACKING":
+                        x_error_integral = 0.0
+                        y_error_integral = 0.0
+                        prev_y_ref_vel_for_unwind = None
+                        prev_x_traj_error_for_d = None
+                        prev_y_traj_error_for_d = None
+                        x_error_derivative_filtered = 0.0
+                        y_error_derivative_filtered = 0.0
 
                 displayed_tracking_started = int(bool(tracking_phase == "TRACKING" or enter_tracking_now))
 
@@ -1565,6 +1702,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             f"Y Traj Error: {y_traj_error:.3f}",
                             f"X Corr: {cmd_x_correction:.3f}",
                             f"Y Corr: {cmd_y_correction:.3f}",
+                            f"Y I: {cmd_y_i_term:.3f}",
+                            f"Y D: {cmd_y_d_term:.3f}",
+                            f"Y Unwind: {'YES' if y_integral_unwind_applied else 'no'}",
                             prepoint_status,
                         ]
                     )
@@ -1658,6 +1798,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{raw_y_angle:.6f}",
                         f"{cmd_x_angle:.6f}",
                         f"{cmd_y_angle:.6f}",
+                        f"{cmd_x_p_term:.6f}",
+                        f"{cmd_y_p_term:.6f}",
+                        f"{cmd_x_i_term:.6f}",
+                        f"{cmd_y_i_term:.6f}",
+                        f"{cmd_x_d_term:.6f}",
+                        f"{cmd_y_d_term:.6f}",
+                        str(y_integral_unwind_applied),
+                        f"{y_error_integral:.6f}",
                         f"{cmd_x_correction:.6f}",
                         f"{cmd_y_correction:.6f}",
                         f"{cmd_x_sent:.6f}",
@@ -1724,6 +1872,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{raw_y_angle:.6f}",
                         f"{cmd_x_angle:.6f}",
                         f"{cmd_y_angle:.6f}",
+                        f"{cmd_x_p_term:.6f}",
+                        f"{cmd_y_p_term:.6f}",
+                        f"{cmd_x_i_term:.6f}",
+                        f"{cmd_y_i_term:.6f}",
+                        f"{cmd_x_d_term:.6f}",
+                        f"{cmd_y_d_term:.6f}",
+                        str(y_integral_unwind_applied),
+                        f"{y_error_integral:.6f}",
                         f"{x_vel:.6f}",
                         f"{y_vel:.6f}",
                         f"{x_acc:.6f}",
