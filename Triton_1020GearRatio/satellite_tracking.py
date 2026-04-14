@@ -30,6 +30,7 @@ TRACK_USE_FILTER = False
 TRACK_USE_LEAD = False
 TRACK_USE_PASSTHROUGH = True
 TRACK_USE_TIME_SPLIT = False
+TRACK_USE_VELOCITY_MODE = True
 TRACK_MAX_DEGREE = 91.0
 TRACK_MIN_DEGREE = -91.0
 TRACK_VEL_FEEDFORWARD_SCALE_X = 1.0
@@ -44,11 +45,25 @@ TRACK_SPI_INTEGRAL_MAX_STATE_Y = 10.0
 TRACK_SPI_INTEGRAL_MAX_CORRECTION_X = 10.0
 TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y = 10.0
 TRACK_SPI_DERIVATIVE_GAIN_X = 0.3
-TRACK_SPI_DERIVATIVE_GAIN_Y = 0.6
+TRACK_SPI_DERIVATIVE_GAIN_Y = 0.0
 TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X = 0.8
-TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y = 1.0
+TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y = 0.6
 TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X = 0.5
-TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y = 10.0
+TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y = 0.15
+TRACK_VELOCITY_POSITION_GAIN_X = 10.0
+TRACK_VELOCITY_POSITION_GAIN_Y = 10.0
+TRACK_VELOCITY_INTEGRAL_GAIN_X = 1.5
+TRACK_VELOCITY_INTEGRAL_GAIN_Y = 1.5
+TRACK_VELOCITY_INTEGRAL_MAX_STATE_X = 10.0
+TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y = 10.0
+TRACK_VELOCITY_ERROR_GAIN_X = 0.4
+TRACK_VELOCITY_ERROR_GAIN_Y = 0.4
+TRACK_SPI_VELOCITY_FILTER_ALPHA_X = 0.7
+TRACK_SPI_VELOCITY_FILTER_ALPHA_Y = 0.7
+TRACK_VELOCITY_COMMAND_MAX_X = 100.0
+TRACK_VELOCITY_COMMAND_MAX_Y = 100.0
+TRACK_VELOCITY_CONTROLLER_MODE = "full"
+TRACK_VELOCITY_DEBUG_SCALE = 1.0
 
 
 def get_local_timezone():
@@ -138,11 +153,30 @@ def update_odrive_axes_with_velocity(x_angle_deg, y_angle_deg, x_vel_deg_s, y_ve
         print(f"ODrive move error: {e}")
 
 
+def update_odrive_axes_velocity_only(x_vel_deg_s, y_vel_deg_s, control):
+    try:
+        control.command_velocity_pair(
+            x_vel_deg_s=max(min(x_vel_deg_s, TRACK_VELOCITY_COMMAND_MAX_X), -TRACK_VELOCITY_COMMAND_MAX_X),
+            y_vel_deg_s=max(min(y_vel_deg_s, TRACK_VELOCITY_COMMAND_MAX_Y), -TRACK_VELOCITY_COMMAND_MAX_Y),
+        )
+    except Exception as e:
+        print(f"ODrive velocity command error: {e}")
+
+
 def clamp_tracking_angles(x_angle_deg, y_angle_deg):
     return (
         max(min(x_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE),
         max(min(y_angle_deg, TRACK_MAX_DEGREE), TRACK_MIN_DEGREE),
     )
+
+
+def shorten_display_path(path_text, max_len=36):
+    if not path_text:
+        return ""
+    name = Path(path_text).name
+    if len(name) <= max_len:
+        return name
+    return f"{name[:max_len-3]}..."
 
 
 def limit_command_step(previous_command, target_command, max_angle_step_deg):
@@ -405,6 +439,7 @@ def load_replay_reference_csv(file_path):
             try:
                 samples.append(
                     {
+                        "utc_time": datetime.datetime.fromisoformat(row["utc_time"]),
                         "elapsed_sec": float(row["elapsed_sec"]),
                         "visible": bool(int(row["sample_visible"])),
                         "tracking_started": bool(int(row.get("tracking_started", "0"))),
@@ -437,6 +472,30 @@ def load_replay_reference_csv(file_path):
             continue
         break
     return samples
+
+
+def interpolate_replay_sample_utc(samples, elapsed_sec):
+    if not samples:
+        return None
+
+    if elapsed_sec <= samples[0]["elapsed_sec"]:
+        return samples[0]["utc_time"]
+
+    if elapsed_sec >= samples[-1]["elapsed_sec"]:
+        return None
+
+    left = samples[0]
+    right = samples[-1]
+    for candidate_left, candidate_right in zip(samples, samples[1:]):
+        if candidate_left["elapsed_sec"] <= elapsed_sec <= candidate_right["elapsed_sec"]:
+            left = candidate_left
+            right = candidate_right
+            break
+
+    span = max(1e-9, right["elapsed_sec"] - left["elapsed_sec"])
+    alpha = max(0.0, min(1.0, (elapsed_sec - left["elapsed_sec"]) / span))
+    dt = right["utc_time"] - left["utc_time"]
+    return left["utc_time"] + datetime.timedelta(seconds=dt.total_seconds() * alpha)
 
 
 def sample_replay_tracking_state(samples, elapsed_sec):
@@ -479,6 +538,16 @@ def sample_replay_tracking_state(samples, elapsed_sec):
         "y_acc": lerp("y_acc"),
         "status": left["status"] if alpha < 0.5 else right["status"],
     }
+
+
+def sample_replay_tracking_state_utc(ts, observer, sat, replay_samples, elapsed_sec, derivative_dt_sec):
+    sample_time_utc = interpolate_replay_sample_utc(replay_samples, elapsed_sec)
+    if sample_time_utc is None:
+        return None
+
+    state = sample_tracking_state_utc(ts, observer, sat, sample_time_utc, derivative_dt_sec)
+    state["elapsed_sec"] = elapsed_sec
+    return state
 
 
 def sample_limited_tracking_target_continuous(
@@ -623,6 +692,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.trajectory_rebuild_margin_sec = TRAJECTORY_REBUILD_MARGIN_SEC
         self.prepoint_lead_time_sec = PREPOINT_LEAD_TIME_SEC
         self.min_trajectory_spacing_sec = MIN_TRAJECTORY_SPACING_SEC
+        self.velocity_position_gain_x = TRACK_VELOCITY_POSITION_GAIN_X
+        self.velocity_position_gain_y = TRACK_VELOCITY_POSITION_GAIN_Y
+        self.velocity_integral_gain_x = TRACK_VELOCITY_INTEGRAL_GAIN_X
+        self.velocity_integral_gain_y = TRACK_VELOCITY_INTEGRAL_GAIN_Y
+        self.velocity_error_gain_x = TRACK_VELOCITY_ERROR_GAIN_X
+        self.velocity_error_gain_y = TRACK_VELOCITY_ERROR_GAIN_Y
+        self.spi_velocity_filter_alpha_x = TRACK_SPI_VELOCITY_FILTER_ALPHA_X
+        self.spi_velocity_filter_alpha_y = TRACK_SPI_VELOCITY_FILTER_ALPHA_Y
+        self.velocity_command_max_x = TRACK_VELOCITY_COMMAND_MAX_X
+        self.velocity_command_max_y = TRACK_VELOCITY_COMMAND_MAX_Y
+        self.velocity_feedforward_scale_x = TRACK_VEL_FEEDFORWARD_SCALE_X
+        self.velocity_feedforward_scale_y = TRACK_VEL_FEEDFORWARD_SCALE_Y
+        self.velocity_controller_mode = TRACK_VELOCITY_CONTROLLER_MODE
+        self.velocity_debug_scale = TRACK_VELOCITY_DEBUG_SCALE
 
         self.running = False
         self.tracking_thread = None
@@ -661,17 +744,101 @@ class SatelliteTrackingWindow(tk.Toplevel):
             row=3, column=0, columnspan=2, pady=6
         )
 
+        settings_container = ttk.Frame(top_frame)
+        settings_container.pack(side="right", anchor="n")
+
+        velocity_frame = ttk.LabelFrame(settings_container, text="Velocity Mode Settings")
+
+        ttk.Label(velocity_frame, text="Kp Pos X").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        self.vel_pos_gain_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_pos_gain_x_entry.grid(row=0, column=1, padx=5, pady=2)
+        self.vel_pos_gain_x_entry.insert(0, f"{self.velocity_position_gain_x:g}")
+
+        ttk.Label(velocity_frame, text="Kp Pos Y").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        self.vel_pos_gain_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_pos_gain_y_entry.grid(row=1, column=1, padx=5, pady=2)
+        self.vel_pos_gain_y_entry.insert(0, f"{self.velocity_position_gain_y:g}")
+
+        ttk.Label(velocity_frame, text="Ki X").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        self.vel_int_gain_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_int_gain_x_entry.grid(row=2, column=1, padx=5, pady=2)
+        self.vel_int_gain_x_entry.insert(0, f"{self.velocity_integral_gain_x:g}")
+
+        ttk.Label(velocity_frame, text="Ki Y").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        self.vel_int_gain_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_int_gain_y_entry.grid(row=3, column=1, padx=5, pady=2)
+        self.vel_int_gain_y_entry.insert(0, f"{self.velocity_integral_gain_y:g}")
+
+        ttk.Label(velocity_frame, text="Kd/Vel X").grid(row=4, column=0, sticky="w", padx=5, pady=2)
+        self.vel_err_gain_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_err_gain_x_entry.grid(row=4, column=1, padx=5, pady=2)
+        self.vel_err_gain_x_entry.insert(0, f"{self.velocity_error_gain_x:g}")
+
+        ttk.Label(velocity_frame, text="Kd/Vel Y").grid(row=5, column=0, sticky="w", padx=5, pady=2)
+        self.vel_err_gain_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_err_gain_y_entry.grid(row=5, column=1, padx=5, pady=2)
+        self.vel_err_gain_y_entry.insert(0, f"{self.velocity_error_gain_y:g}")
+
+        ttk.Label(velocity_frame, text="Vel Alpha X").grid(row=6, column=0, sticky="w", padx=5, pady=2)
+        self.vel_alpha_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_alpha_x_entry.grid(row=6, column=1, padx=5, pady=2)
+        self.vel_alpha_x_entry.insert(0, f"{self.spi_velocity_filter_alpha_x:g}")
+
+        ttk.Label(velocity_frame, text="Vel Alpha Y").grid(row=7, column=0, sticky="w", padx=5, pady=2)
+        self.vel_alpha_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_alpha_y_entry.grid(row=7, column=1, padx=5, pady=2)
+        self.vel_alpha_y_entry.insert(0, f"{self.spi_velocity_filter_alpha_y:g}")
+
+        ttk.Label(velocity_frame, text="Vel Max X").grid(row=8, column=0, sticky="w", padx=5, pady=2)
+        self.vel_cmd_max_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_cmd_max_x_entry.grid(row=8, column=1, padx=5, pady=2)
+        self.vel_cmd_max_x_entry.insert(0, f"{self.velocity_command_max_x:g}")
+
+        ttk.Label(velocity_frame, text="Vel Max Y").grid(row=9, column=0, sticky="w", padx=5, pady=2)
+        self.vel_cmd_max_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_cmd_max_y_entry.grid(row=9, column=1, padx=5, pady=2)
+        self.vel_cmd_max_y_entry.insert(0, f"{self.velocity_command_max_y:g}")
+
+        ttk.Label(velocity_frame, text="FF Scale X").grid(row=10, column=0, sticky="w", padx=5, pady=2)
+        self.vel_ff_scale_x_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_ff_scale_x_entry.grid(row=10, column=1, padx=5, pady=2)
+        self.vel_ff_scale_x_entry.insert(0, f"{self.velocity_feedforward_scale_x:g}")
+
+        ttk.Label(velocity_frame, text="FF Scale Y").grid(row=11, column=0, sticky="w", padx=5, pady=2)
+        self.vel_ff_scale_y_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_ff_scale_y_entry.grid(row=11, column=1, padx=5, pady=2)
+        self.vel_ff_scale_y_entry.insert(0, f"{self.velocity_feedforward_scale_y:g}")
+
+        ttk.Label(velocity_frame, text="Ctrl Mode").grid(row=12, column=0, sticky="w", padx=5, pady=2)
+        self.vel_controller_mode_var = tk.StringVar(value=self.velocity_controller_mode)
+        ttk.Combobox(
+            velocity_frame,
+            textvariable=self.vel_controller_mode_var,
+            values=("full", "velocity_error_only", "feedforward_only"),
+            state="readonly",
+            width=18,
+        ).grid(row=12, column=1, padx=5, pady=2)
+
+        ttk.Label(velocity_frame, text="Vel Debug Scale").grid(row=13, column=0, sticky="w", padx=5, pady=2)
+        self.vel_debug_scale_entry = ttk.Entry(velocity_frame, width=10)
+        self.vel_debug_scale_entry.grid(row=13, column=1, padx=5, pady=2)
+        self.vel_debug_scale_entry.insert(0, f"{self.velocity_debug_scale:g}")
+
+        ttk.Button(velocity_frame, text="Apply Vel Gains", command=self.apply_tracking_settings).grid(
+            row=14, column=0, columnspan=2, pady=6
+        )
+
         tle_frame = ttk.LabelFrame(top_frame, text="TLE And Satellite")
         tle_frame.pack(side="left", fill="x", expand=True, padx=10, anchor="n")
 
         ttk.Label(tle_frame, text="Select TLE File:").grid(row=0, column=0, sticky="w", padx=5, pady=(5, 2))
         ttk.Button(tle_frame, text="Browse", command=self.load_tle).grid(row=0, column=1, sticky="w", padx=5, pady=(5, 2))
 
-        self.tle_file_label = ttk.Label(tle_frame, text="No file selected")
+        self.tle_file_label = ttk.Label(tle_frame, text="No file selected", width=32)
         self.tle_file_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         ttk.Label(tle_frame, text="Select Satellite:").grid(row=2, column=0, sticky="w", padx=5, pady=(8, 2))
-        self.sat_combobox = ttk.Combobox(tle_frame, state="readonly", width=48)
+        self.sat_combobox = ttk.Combobox(tle_frame, state="readonly", width=34)
         self.sat_combobox.grid(row=3, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
         ttk.Button(tle_frame, text="Refresh Pass Times", command=self.refresh_satellite_display).grid(
             row=2, column=1, sticky="e", padx=5, pady=(8, 2)
@@ -682,7 +849,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
             tle_frame,
             state="readonly",
             width=18,
-            values=("live", "replay"),
+            values=("live", "replay", "replay_utc"),
             textvariable=self.reference_mode_var,
         )
         self.reference_mode_combo.grid(row=4, column=1, sticky="w", padx=5, pady=(8, 2))
@@ -690,7 +857,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         ttk.Button(tle_frame, text="Replay File", command=self.load_replay_file).grid(
             row=5, column=0, sticky="w", padx=5, pady=(2, 2)
         )
-        self.replay_file_label = ttk.Label(tle_frame, text="No replay file selected")
+        self.replay_file_label = ttk.Label(tle_frame, text="No replay file selected", width=32)
         self.replay_file_label.grid(row=5, column=1, sticky="ew", padx=5, pady=(2, 2))
 
         button_row = ttk.Frame(tle_frame)
@@ -700,8 +867,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         tle_frame.columnconfigure(0, weight=1)
 
-        settings_frame = ttk.LabelFrame(top_frame, text="Tracking Settings")
-        settings_frame.pack(side="right", anchor="n")
+        settings_frame = ttk.LabelFrame(settings_container, text="Tracking Settings")
+        settings_frame.pack(side="left", anchor="n")
 
         ttk.Label(settings_frame, text="Cmd Interval (s)").grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.cmd_interval_entry = ttk.Entry(settings_frame, width=10)
@@ -762,6 +929,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         settings_frame.columnconfigure(2, weight=0)
         settings_frame.columnconfigure(3, weight=0)
 
+        velocity_frame.pack(side="left", anchor="n", padx=(10, 0))
+
         output_frame = ttk.Frame(self)
         output_frame.pack(fill="x", padx=10, pady=(6, 10))
 
@@ -808,12 +977,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.error_canvas.draw_idle()
 
     def set_output_text(self, text):
+        prior_yview = self.output_text.yview()
         self.output_text.configure(state="normal")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert("1.0", text)
         self.output_text.configure(state="disabled")
+        if prior_yview:
+            self.output_text.yview_moveto(prior_yview[0])
 
-    def format_output_columns(self, lines, columns=2, gutter=4):
+    def format_output_columns(self, lines, columns=3, gutter=4):
         if not lines:
             return ""
 
@@ -861,6 +1033,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
             capture_error = float(self.capture_error_entry.get())
             rebuild_margin = float(self.rebuild_margin_entry.get())
             prepoint_lead = float(self.prepoint_lead_entry.get())
+            velocity_position_gain_x = float(self.vel_pos_gain_x_entry.get())
+            velocity_position_gain_y = float(self.vel_pos_gain_y_entry.get())
+            velocity_integral_gain_x = float(self.vel_int_gain_x_entry.get())
+            velocity_integral_gain_y = float(self.vel_int_gain_y_entry.get())
+            velocity_error_gain_x = float(self.vel_err_gain_x_entry.get())
+            velocity_error_gain_y = float(self.vel_err_gain_y_entry.get())
+            spi_velocity_filter_alpha_x = float(self.vel_alpha_x_entry.get())
+            spi_velocity_filter_alpha_y = float(self.vel_alpha_y_entry.get())
+            velocity_command_max_x = float(self.vel_cmd_max_x_entry.get())
+            velocity_command_max_y = float(self.vel_cmd_max_y_entry.get())
+            velocity_feedforward_scale_x = float(self.vel_ff_scale_x_entry.get())
+            velocity_feedforward_scale_y = float(self.vel_ff_scale_y_entry.get())
+            velocity_controller_mode = self.vel_controller_mode_var.get().strip()
+            velocity_debug_scale = float(self.vel_debug_scale_entry.get())
 
             if (
                 cmd_interval <= 0
@@ -873,6 +1059,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 or capture_error <= 0
                 or rebuild_margin <= 0
                 or prepoint_lead <= 0
+                or velocity_command_max_x <= 0
+                or velocity_command_max_y <= 0
+                or velocity_debug_scale <= 0
             ):
                 raise ValueError
             if point_spacing > horizon:
@@ -880,6 +1069,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
             if rebuild_margin >= horizon:
                 raise ValueError
             if min_spacing > point_spacing:
+                raise ValueError
+            if not (0.0 <= spi_velocity_filter_alpha_x < 1.0):
+                raise ValueError
+            if not (0.0 <= spi_velocity_filter_alpha_y < 1.0):
+                raise ValueError
+            if velocity_controller_mode not in ("full", "velocity_error_only", "feedforward_only"):
                 raise ValueError
 
             self.track_command_interval_sec = cmd_interval
@@ -892,6 +1087,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.track_capture_error_deg = capture_error
             self.trajectory_rebuild_margin_sec = rebuild_margin
             self.prepoint_lead_time_sec = prepoint_lead
+            self.velocity_position_gain_x = velocity_position_gain_x
+            self.velocity_position_gain_y = velocity_position_gain_y
+            self.velocity_integral_gain_x = velocity_integral_gain_x
+            self.velocity_integral_gain_y = velocity_integral_gain_y
+            self.velocity_error_gain_x = velocity_error_gain_x
+            self.velocity_error_gain_y = velocity_error_gain_y
+            self.spi_velocity_filter_alpha_x = spi_velocity_filter_alpha_x
+            self.spi_velocity_filter_alpha_y = spi_velocity_filter_alpha_y
+            self.velocity_command_max_x = velocity_command_max_x
+            self.velocity_command_max_y = velocity_command_max_y
+            self.velocity_feedforward_scale_x = velocity_feedforward_scale_x
+            self.velocity_feedforward_scale_y = velocity_feedforward_scale_y
+            self.velocity_controller_mode = velocity_controller_mode
+            self.velocity_debug_scale = velocity_debug_scale
         except Exception:
             messagebox.showerror(
                 "Error",
@@ -900,7 +1109,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     "Lead can be zero or positive.\n"
                     "Point spacing cannot exceed horizon.\n"
                     "Rebuild margin must be smaller than horizon.\n"
-                    "Min spacing cannot exceed point spacing."
+                    "Min spacing cannot exceed point spacing.\n"
+                    "Velocity filter alpha must be in [0, 1).\n"
+                    "Velocity command max and debug scale must be positive."
                 ),
             )
 
@@ -909,7 +1120,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         if not file_path:
             return
 
-        self.tle_file_label.config(text=file_path)
+        self.tle_file_label.config(text=shorten_display_path(file_path))
 
         with open(file_path, "r") as f:
             lines = f.readlines()
@@ -947,7 +1158,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         self.replay_path = file_path
         self.replay_samples = replay_samples
-        self.replay_file_label.config(text=file_path)
+        self.replay_file_label.config(text=shorten_display_path(file_path))
         self.reference_mode_var.set("replay")
         messagebox.showinfo("Replay Loaded", f"Loaded {len(replay_samples)} replay samples.")
 
@@ -981,18 +1192,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         next_rise = ti.utc_datetime().replace(tzinfo=utc)
                         break
 
+                short_name = sat.name[:24].rstrip()
                 if next_rise:
                     dt = next_rise - now_utc
                     minutes = max(0, int(dt.total_seconds() / 60))
-                    local_rise_text = format_local_datetime(next_rise)
-                    label = f"{sat.name} [{sat.model.satnum}] - {local_rise_text} local (in {minutes} min)"
+                    label = f"{short_name} [{sat.model.satnum}]  {minutes}m"
                     sort_key = dt.total_seconds()
                 else:
-                    label = f"{sat.name} [{sat.model.satnum}] - No pass soon"
+                    label = f"{short_name} [{sat.model.satnum}]  no pass"
                     sort_key = 999999999
 
             except Exception:
-                label = f"{sat.name} [{sat.model.satnum}]"
+                short_name = sat.name[:24].rstrip()
+                label = f"{short_name} [{sat.model.satnum}]"
                 sort_key = 999999999
 
             display_data.append((sort_key, label, idx))
@@ -1020,7 +1232,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
     def start_tracking_thread(self):
         reference_mode = self.reference_mode_var.get()
-        replay_mode = reference_mode == "replay"
+        replay_mode = reference_mode in ("replay", "replay_utc")
+        replay_utc_mode = reference_mode == "replay_utc"
         sat_index = None
         sat_label = "Replay"
 
@@ -1028,8 +1241,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
             if not self.replay_samples:
                 messagebox.showerror("Error", "Load a replay CSV first")
                 return
-            replay_path = Path(self.replay_path) if self.replay_path else None
-            sat_label = replay_path.stem.replace("_reference", "") if replay_path else "Replay"
+            if replay_utc_mode:
+                if not self.satellites:
+                    messagebox.showerror("Error", "Load TLE first for replay_utc mode")
+                    return
+                sel = self.sat_combobox.current()
+                if sel < 0:
+                    messagebox.showerror("Error", "Select satellite for replay_utc mode")
+                    return
+                sat_index = self.display_map[sel]
+                sat_label = f"{self.satellites[sat_index].name} [UTC Replay]"
+            else:
+                replay_path = Path(self.replay_path) if self.replay_path else None
+                sat_label = replay_path.stem.replace("_reference", "") if replay_path else "Replay"
         else:
             if not self.satellites:
                 messagebox.showerror("Error", "Load TLE first")
@@ -1118,10 +1342,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
     def track_satellite_loop(self, sat_index):
         reference_mode = self.reference_mode_var.get()
-        replay_mode = reference_mode == "replay"
-        ts = load.timescale() if not replay_mode else None
-        observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon) if not replay_mode else None
-        sat = self.satellites[sat_index] if not replay_mode else None
+        replay_mode = reference_mode in ("replay", "replay_utc")
+        replay_utc_mode = reference_mode == "replay_utc"
+        ts = load.timescale() if (not replay_mode or replay_utc_mode) else None
+        observer = Topos(latitude_degrees=self.observer_lat, longitude_degrees=self.observer_lon) if (not replay_mode or replay_utc_mode) else None
+        sat = self.satellites[sat_index] if (not replay_mode or replay_utc_mode) else None
         replay_samples = list(self.replay_samples) if replay_mode else None
         sat_name = sat.name if sat is not None else (Path(self.replay_path).stem.replace("_reference", "") if self.replay_path else "Replay")
         self.set_output_text(
@@ -1197,6 +1422,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_acc_deg_per_s2",
                 "cmd_x_vel_ff_deg_per_s",
                 "cmd_y_vel_ff_deg_per_s",
+                "cmd_x_vel_sent_deg_per_s",
+                "cmd_y_vel_sent_deg_per_s",
+                "x_actual_vel_raw_deg_per_s",
+                "y_actual_vel_raw_deg_per_s",
+                "x_actual_vel_deg_per_s",
+                "y_actual_vel_deg_per_s",
+                "x_vel_error_deg_per_s",
+                "y_vel_error_deg_per_s",
+                "velocity_mode_active",
                 "x_control_mode",
                 "x_input_mode",
                 "y_control_mode",
@@ -1263,6 +1497,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_acc_deg_per_s2",
                 "cmd_x_vel_ff_deg_per_s",
                 "cmd_y_vel_ff_deg_per_s",
+                "cmd_x_vel_sent_deg_per_s",
+                "cmd_y_vel_sent_deg_per_s",
+                "x_actual_vel_raw_deg_per_s",
+                "y_actual_vel_raw_deg_per_s",
+                "x_actual_vel_deg_per_s",
+                "y_actual_vel_deg_per_s",
+                "x_vel_error_deg_per_s",
+                "y_vel_error_deg_per_s",
+                "velocity_mode_active",
                 "status",
             ]
         )
@@ -1283,20 +1526,39 @@ class SatelliteTrackingWindow(tk.Toplevel):
         replay_ended = False
         x_error_integral = 0.0
         y_error_integral = 0.0
+        x_velocity_error_integral = 0.0
+        y_velocity_error_integral = 0.0
         prev_y_ref_vel_for_unwind = None
         prev_x_traj_error_for_d = None
         prev_y_traj_error_for_d = None
         x_error_derivative_filtered = 0.0
         y_error_derivative_filtered = 0.0
+        prev_x_actual_for_vel = None
+        prev_y_actual_for_vel = None
+        prev_x_actual_elapsed_sec = None
+        prev_y_actual_elapsed_sec = None
+        x_actual_vel_raw = 0.0
+        y_actual_vel_raw = 0.0
+        x_actual_vel_filtered = 0.0
+        y_actual_vel_filtered = 0.0
 
         def stow_axes():
             nonlocal x_error_integral, y_error_integral, prev_y_ref_vel_for_unwind
+            nonlocal x_velocity_error_integral, y_velocity_error_integral
             nonlocal prev_x_traj_error_for_d, prev_y_traj_error_for_d
             nonlocal x_error_derivative_filtered, y_error_derivative_filtered
+            nonlocal prev_x_actual_for_vel, prev_y_actual_for_vel
+            nonlocal prev_x_actual_elapsed_sec, prev_y_actual_elapsed_sec
+            nonlocal x_actual_vel_raw, y_actual_vel_raw
+            nonlocal x_actual_vel_filtered, y_actual_vel_filtered
             if not self.control:
                 return
             try:
                 self.control.exit_tracking_mode_all()
+            except Exception:
+                pass
+            try:
+                self.control.exit_velocity_mode_all()
             except Exception:
                 pass
             if self.preposition_gains:
@@ -1310,13 +1572,25 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 pass
             x_error_integral = 0.0
             y_error_integral = 0.0
+            x_velocity_error_integral = 0.0
+            y_velocity_error_integral = 0.0
             prev_y_ref_vel_for_unwind = None
             prev_x_traj_error_for_d = None
             prev_y_traj_error_for_d = None
             x_error_derivative_filtered = 0.0
             y_error_derivative_filtered = 0.0
+            prev_x_actual_for_vel = None
+            prev_y_actual_for_vel = None
+            prev_x_actual_elapsed_sec = None
+            prev_y_actual_elapsed_sec = None
+            x_actual_vel_raw = 0.0
+            y_actual_vel_raw = 0.0
+            x_actual_vel_filtered = 0.0
+            y_actual_vel_filtered = 0.0
 
         def sample_reference(sample_elapsed_sec, sample_time_utc, derivative_dt_sec):
+            if replay_utc_mode:
+                return sample_replay_tracking_state_utc(ts, observer, sat, replay_samples, sample_elapsed_sec, derivative_dt_sec)
             if replay_mode:
                 return sample_replay_tracking_state(replay_samples, sample_elapsed_sec)
             return sample_tracking_state_utc(ts, observer, sat, sample_time_utc, derivative_dt_sec)
@@ -1387,7 +1661,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 if replay_mode:
                     rise_eta_text = "Rise ETA: replay"
                     rise_local_text = "Rise Local: replay"
-                    prepoint_status = "Replay reference"
+                    prepoint_status = "Replay UTC reference" if replay_utc_mode else "Replay reference"
                 elif next_rise_utc and not was_visible:
                     seconds_to_rise = (next_rise_utc - now_utc).total_seconds()
                     if seconds_to_rise > 0:
@@ -1443,8 +1717,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 x_angle = command_sample["x_angle"]
                 y_angle = command_sample["y_angle"]
-                cmd_x_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_X * command_sample.get("x_vel", x_vel)
-                cmd_y_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_Y * command_sample.get("y_vel", y_vel)
+                cmd_x_vel_ff = self.velocity_feedforward_scale_x * command_sample.get("x_vel", x_vel)
+                cmd_y_vel_ff = self.velocity_feedforward_scale_y * command_sample.get("y_vel", y_vel)
 
                 x_angle, y_angle = clamp_tracking_angles(x_angle, y_angle)
                 cmd_x_angle = x_angle
@@ -1460,17 +1734,24 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 cmd_y_correction = 0.0
                 cmd_x_sent = cmd_x_angle
                 cmd_y_sent = cmd_y_angle
+                cmd_x_vel_sent = 0.0
+                cmd_y_vel_sent = 0.0
                 raw_dx = 0.0 if last_raw_angles is None else raw_x_angle - last_raw_angles[0]
                 raw_dy = 0.0 if last_raw_angles is None else raw_y_angle - last_raw_angles[1]
                 cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
                 cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
                 x_actual = None
                 y_actual = None
+                x_actual_vel = 0.0
+                y_actual_vel = 0.0
+                x_vel_error = 0.0
+                y_vel_error = 0.0
                 x_error = 0.0
                 y_error = 0.0
                 x_traj_error = 0.0
                 y_traj_error = 0.0
                 capture_error = None
+                velocity_mode_active = int(bool(TRACK_USE_VELOCITY_MODE))
                 x_control_mode = None
                 x_input_mode = None
                 y_control_mode = None
@@ -1540,6 +1821,44 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 y_ideal_sample["y_angle"],
                             )
                             y_traj_error = ideal_y_angle - y_actual
+                        if (
+                            prev_x_actual_for_vel is not None
+                            and prev_x_actual_elapsed_sec is not None
+                            and meas_x_elapsed_sec is not None
+                            and meas_x_elapsed_sec > prev_x_actual_elapsed_sec
+                        ):
+                            x_actual_vel_raw = (
+                                x_actual - prev_x_actual_for_vel
+                            ) / (meas_x_elapsed_sec - prev_x_actual_elapsed_sec)
+                            x_actual_vel_filtered = (
+                                self.spi_velocity_filter_alpha_x * x_actual_vel_filtered
+                                + (1.0 - self.spi_velocity_filter_alpha_x) * x_actual_vel_raw
+                            )
+                        else:
+                            x_actual_vel_raw = 0.0
+                            x_actual_vel_filtered = 0.0
+                        if (
+                            prev_y_actual_for_vel is not None
+                            and prev_y_actual_elapsed_sec is not None
+                            and meas_y_elapsed_sec is not None
+                            and meas_y_elapsed_sec > prev_y_actual_elapsed_sec
+                        ):
+                            y_actual_vel_raw = (
+                                y_actual - prev_y_actual_for_vel
+                            ) / (meas_y_elapsed_sec - prev_y_actual_elapsed_sec)
+                            y_actual_vel_filtered = (
+                                self.spi_velocity_filter_alpha_y * y_actual_vel_filtered
+                                + (1.0 - self.spi_velocity_filter_alpha_y) * y_actual_vel_raw
+                            )
+                        else:
+                            y_actual_vel_raw = 0.0
+                            y_actual_vel_filtered = 0.0
+                        x_actual_vel = x_actual_vel_filtered
+                        y_actual_vel = y_actual_vel_filtered
+                        prev_x_actual_for_vel = x_actual
+                        prev_y_actual_for_vel = y_actual
+                        prev_x_actual_elapsed_sec = meas_x_elapsed_sec
+                        prev_y_actual_elapsed_sec = meas_y_elapsed_sec
                         capture_error = max(abs(x_error), abs(y_error))
                     except Exception:
                         x_actual = None
@@ -1555,17 +1874,31 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 enter_tracking_now = tracking_phase != "TRACKING" and track_gate_open and settled_cycles >= 3
                 should_track_now = track_gate_open and (tracking_phase == "TRACKING" or enter_tracking_now)
+                use_velocity_tracking_mode = bool(TRACK_USE_VELOCITY_MODE)
 
-                if TRACK_USE_PASSTHROUGH and enter_tracking_now and self.control:
+                if enter_tracking_now and self.control:
                     x_error_integral = 0.0
                     y_error_integral = 0.0
+                    x_velocity_error_integral = 0.0
+                    y_velocity_error_integral = 0.0
                     prev_y_ref_vel_for_unwind = None
                     prev_x_traj_error_for_d = None
                     prev_y_traj_error_for_d = None
                     x_error_derivative_filtered = 0.0
                     y_error_derivative_filtered = 0.0
+                    prev_x_actual_for_vel = None
+                    prev_y_actual_for_vel = None
+                    prev_x_actual_elapsed_sec = None
+                    prev_y_actual_elapsed_sec = None
+                    x_actual_vel_raw = 0.0
+                    y_actual_vel_raw = 0.0
+                    x_actual_vel_filtered = 0.0
+                    y_actual_vel_filtered = 0.0
                     try:
-                        self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
+                        if use_velocity_tracking_mode:
+                            self.control.enter_velocity_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
+                        elif TRACK_USE_PASSTHROUGH:
+                            self.control.enter_tracking_mode_all(input_filter_bandwidth=self.track_filter_bandwidth_hz)
                     except Exception:
                         pass
 
@@ -1586,8 +1919,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         cmd_y_angle = y_angle
                         cmd_dx = 0.0 if last_display_command is None else cmd_x_angle - last_display_command[0]
                         cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
-                        cmd_x_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_X * command_sample.get("x_vel", cmd_x_vel_ff)
-                        cmd_y_vel_ff = TRACK_VEL_FEEDFORWARD_SCALE_Y * command_sample.get("y_vel", cmd_y_vel_ff)
+                        cmd_x_vel_ff = self.velocity_feedforward_scale_x * command_sample.get("x_vel", cmd_x_vel_ff)
+                        cmd_y_vel_ff = self.velocity_feedforward_scale_y * command_sample.get("y_vel", cmd_y_vel_ff)
                         if x_actual is not None and y_actual is not None:
                             x_error = cmd_x_angle - x_actual
                             y_error = cmd_y_angle - y_actual
@@ -1596,65 +1929,102 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             prepoint_status = "Below-horizon pickup"
 
                 if should_track_now and x_actual is not None and y_actual is not None:
-                    cmd_x_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_X * x_traj_error
-                    cmd_y_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_Y * y_traj_error
-                    if abs(x_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
-                        x_error_integral += x_traj_error * observed_loop_period_sec
-                        x_error_integral = max(
-                            -TRACK_SPI_INTEGRAL_MAX_STATE_X,
-                            min(TRACK_SPI_INTEGRAL_MAX_STATE_X, x_error_integral),
+                    if use_velocity_tracking_mode:
+                        x_velocity_error_integral += x_traj_error * observed_loop_period_sec
+                        y_velocity_error_integral += y_traj_error * observed_loop_period_sec
+                        x_velocity_error_integral = max(
+                            -TRACK_VELOCITY_INTEGRAL_MAX_STATE_X,
+                            min(TRACK_VELOCITY_INTEGRAL_MAX_STATE_X, x_velocity_error_integral),
                         )
-                    cmd_x_i_term = TRACK_SPI_INTEGRAL_GAIN_X * x_error_integral
-                    cmd_x_i_term = max(
-                        -TRACK_SPI_INTEGRAL_MAX_CORRECTION_X,
-                        min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_X, cmd_x_i_term),
-                    )
-                    if abs(y_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
-                        y_error_integral += y_traj_error * observed_loop_period_sec
-                        y_error_integral = max(
-                            -TRACK_SPI_INTEGRAL_MAX_STATE_Y,
-                            min(TRACK_SPI_INTEGRAL_MAX_STATE_Y, y_error_integral),
+                        y_velocity_error_integral = max(
+                            -TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y,
+                            min(TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y, y_velocity_error_integral),
                         )
-                    cmd_y_i_term = TRACK_SPI_INTEGRAL_GAIN_Y * y_error_integral
-                    cmd_y_i_term = max(
-                        -TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y,
-                        min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y, cmd_y_i_term),
-                    )
-                    if prev_x_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
-                        x_error_derivative_filtered = 0.0
+                        x_vel_error = cmd_x_vel_ff - x_actual_vel
+                        y_vel_error = cmd_y_vel_ff - y_actual_vel
+                        if self.velocity_controller_mode == "feedforward_only":
+                            cmd_x_vel_sent = cmd_x_vel_ff
+                            cmd_y_vel_sent = cmd_y_vel_ff
+                        elif self.velocity_controller_mode == "velocity_error_only":
+                            cmd_x_vel_sent = cmd_x_vel_ff + self.velocity_error_gain_x * x_vel_error
+                            cmd_y_vel_sent = cmd_y_vel_ff + self.velocity_error_gain_y * y_vel_error
+                        else:
+                            cmd_x_vel_sent = (
+                                cmd_x_vel_ff
+                                + self.velocity_position_gain_x * x_traj_error
+                                + self.velocity_integral_gain_x * x_velocity_error_integral
+                                + self.velocity_error_gain_x * x_vel_error
+                            )
+                            cmd_y_vel_sent = (
+                                cmd_y_vel_ff
+                                + self.velocity_position_gain_y * y_traj_error
+                                + self.velocity_integral_gain_y * y_velocity_error_integral
+                                + self.velocity_error_gain_y * y_vel_error
+                            )
+                        cmd_x_vel_sent *= self.velocity_debug_scale
+                        cmd_y_vel_sent *= self.velocity_debug_scale
+                        cmd_x_vel_sent = max(min(cmd_x_vel_sent, self.velocity_command_max_x), -self.velocity_command_max_x)
+                        cmd_y_vel_sent = max(min(cmd_y_vel_sent, self.velocity_command_max_y), -self.velocity_command_max_y)
                     else:
-                        x_error_derivative_raw = (x_traj_error - prev_x_traj_error_for_d) / observed_loop_period_sec
-                        x_error_derivative_filtered = (
-                            TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X * x_error_derivative_filtered
-                            + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X) * x_error_derivative_raw
+                        cmd_x_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_X * x_traj_error
+                        cmd_y_p_term = TRACK_SPI_POSITION_CORRECTION_GAIN_Y * y_traj_error
+                        if abs(x_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
+                            x_error_integral += x_traj_error * observed_loop_period_sec
+                            x_error_integral = max(
+                                -TRACK_SPI_INTEGRAL_MAX_STATE_X,
+                                min(TRACK_SPI_INTEGRAL_MAX_STATE_X, x_error_integral),
+                            )
+                        cmd_x_i_term = TRACK_SPI_INTEGRAL_GAIN_X * x_error_integral
+                        cmd_x_i_term = max(
+                            -TRACK_SPI_INTEGRAL_MAX_CORRECTION_X,
+                            min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_X, cmd_x_i_term),
                         )
-                    cmd_x_d_term = TRACK_SPI_DERIVATIVE_GAIN_X * x_error_derivative_filtered
-                    cmd_x_d_term = max(
-                        -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X,
-                        min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X, cmd_x_d_term),
-                    )
-                    if prev_y_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
-                        y_error_derivative_filtered = 0.0
-                    else:
-                        y_error_derivative_raw = (y_traj_error - prev_y_traj_error_for_d) / observed_loop_period_sec
-                        y_error_derivative_filtered = (
-                            TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y * y_error_derivative_filtered
-                            + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y) * y_error_derivative_raw
+                        if abs(y_traj_error) <= TRACK_SPI_INTEGRAL_ACTIVE_ERROR_DEG:
+                            y_error_integral += y_traj_error * observed_loop_period_sec
+                            y_error_integral = max(
+                                -TRACK_SPI_INTEGRAL_MAX_STATE_Y,
+                                min(TRACK_SPI_INTEGRAL_MAX_STATE_Y, y_error_integral),
+                            )
+                        cmd_y_i_term = TRACK_SPI_INTEGRAL_GAIN_Y * y_error_integral
+                        cmd_y_i_term = max(
+                            -TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y,
+                            min(TRACK_SPI_INTEGRAL_MAX_CORRECTION_Y, cmd_y_i_term),
                         )
-                    cmd_y_d_term = TRACK_SPI_DERIVATIVE_GAIN_Y * y_error_derivative_filtered
-                    cmd_y_d_term = max(
-                        -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y,
-                        min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y, cmd_y_d_term),
-                    )
-                    prev_x_traj_error_for_d = x_traj_error
-                    prev_y_traj_error_for_d = y_traj_error
-                    prev_y_ref_vel_for_unwind = cmd_y_vel_ff
-                    cmd_x_correction = cmd_x_p_term + cmd_x_i_term + cmd_x_d_term
-                    cmd_y_correction = cmd_y_p_term + cmd_y_i_term + cmd_y_d_term
-                    cmd_x_sent, cmd_y_sent = clamp_tracking_angles(
-                        cmd_x_angle + cmd_x_correction,
-                        cmd_y_angle + cmd_y_correction,
-                    )
+                        if prev_x_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                            x_error_derivative_filtered = 0.0
+                        else:
+                            x_error_derivative_raw = (x_traj_error - prev_x_traj_error_for_d) / observed_loop_period_sec
+                            x_error_derivative_filtered = (
+                                TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X * x_error_derivative_filtered
+                                + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_X) * x_error_derivative_raw
+                            )
+                        cmd_x_d_term = TRACK_SPI_DERIVATIVE_GAIN_X * x_error_derivative_filtered
+                        cmd_x_d_term = max(
+                            -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X,
+                            min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X, cmd_x_d_term),
+                        )
+                        if prev_y_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                            y_error_derivative_filtered = 0.0
+                        else:
+                            y_error_derivative_raw = (y_traj_error - prev_y_traj_error_for_d) / observed_loop_period_sec
+                            y_error_derivative_filtered = (
+                                TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y * y_error_derivative_filtered
+                                + (1.0 - TRACK_SPI_DERIVATIVE_FILTER_ALPHA_Y) * y_error_derivative_raw
+                            )
+                        cmd_y_d_term = TRACK_SPI_DERIVATIVE_GAIN_Y * y_error_derivative_filtered
+                        cmd_y_d_term = max(
+                            -TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y,
+                            min(TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y, cmd_y_d_term),
+                        )
+                        prev_x_traj_error_for_d = x_traj_error
+                        prev_y_traj_error_for_d = y_traj_error
+                        prev_y_ref_vel_for_unwind = cmd_y_vel_ff
+                        cmd_x_correction = cmd_x_p_term + cmd_x_i_term + cmd_x_d_term
+                        cmd_y_correction = cmd_y_p_term + cmd_y_i_term + cmd_y_d_term
+                        cmd_x_sent, cmd_y_sent = clamp_tracking_angles(
+                            cmd_x_angle + cmd_x_correction,
+                            cmd_y_angle + cmd_y_correction,
+                        )
                 else:
                     cmd_x_p_term = 0.0
                     cmd_y_p_term = 0.0
@@ -1665,11 +2035,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     if tracking_phase != "TRACKING":
                         x_error_integral = 0.0
                         y_error_integral = 0.0
+                        x_velocity_error_integral = 0.0
+                        y_velocity_error_integral = 0.0
                         prev_y_ref_vel_for_unwind = None
                         prev_x_traj_error_for_d = None
                         prev_y_traj_error_for_d = None
                         x_error_derivative_filtered = 0.0
                         y_error_derivative_filtered = 0.0
+                        prev_x_actual_for_vel = None
+                        prev_y_actual_for_vel = None
+                        prev_x_actual_elapsed_sec = None
+                        prev_y_actual_elapsed_sec = None
+                        x_actual_vel_filtered = 0.0
+                        y_actual_vel_filtered = 0.0
 
                 displayed_tracking_started = int(bool(tracking_phase == "TRACKING" or enter_tracking_now))
 
@@ -1689,8 +2067,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             f"dCmd Y: {cmd_dy:.3f}",
                             f"X Vel: {x_vel:.3f}",
                             f"Y Vel: {y_vel:.3f}",
+                            f"X Act Vel: {x_actual_vel:.3f}",
+                            f"Y Act Vel: {y_actual_vel:.3f}",
+                            f"X Cmd Vel: {cmd_x_vel_sent:.3f}",
+                            f"Y Cmd Vel: {cmd_y_vel_sent:.3f}",
                             f"X Acc: {x_acc:.3f}",
                             f"Y Acc: {y_acc:.3f}",
+                            f"Mode: {'VEL' if use_velocity_tracking_mode else 'POS'}",
                             f"Rebuilt: {'YES' if rebuilt_trajectory else 'no'}",
                             rise_eta_text,
                             rise_local_text,
@@ -1729,17 +2112,28 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 except Exception:
                                     pass
                             command_send_start = time.monotonic()
-                            update_odrive_axes_with_velocity(
-                                cmd_x_sent,
-                                cmd_y_sent,
-                                cmd_x_vel_ff,
-                                cmd_y_vel_ff,
-                                self.control,
-                            )
+                            if use_velocity_tracking_mode:
+                                update_odrive_axes_velocity_only(
+                                    cmd_x_vel_sent,
+                                    cmd_y_vel_sent,
+                                    self.control,
+                                )
+                            else:
+                                update_odrive_axes_with_velocity(
+                                    cmd_x_sent,
+                                    cmd_y_sent,
+                                    cmd_x_vel_ff,
+                                    cmd_y_vel_ff,
+                                    self.control,
+                                )
                             command_send_done = time.monotonic()
                             command_send_ms = (command_send_done - command_send_start) * 1000.0
                             command_send_elapsed_sec = command_send_done - tracking_start_monotonic
-                            last_tracking_command = (cmd_x_sent, cmd_y_sent)
+                            last_tracking_command = (
+                                (cmd_x_vel_sent, cmd_y_vel_sent)
+                                if use_velocity_tracking_mode
+                                else (cmd_x_sent, cmd_y_sent)
+                            )
                             if enter_tracking_now:
                                 tracking_phase = "TRACKING"
                                 tracking_started = True
@@ -1820,6 +2214,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_acc:.6f}",
                         f"{cmd_x_vel_ff:.6f}",
                         f"{cmd_y_vel_ff:.6f}",
+                        f"{cmd_x_vel_sent:.6f}",
+                        f"{cmd_y_vel_sent:.6f}",
+                        f"{x_actual_vel_raw:.6f}",
+                        f"{y_actual_vel_raw:.6f}",
+                        f"{x_actual_vel:.6f}",
+                        f"{y_actual_vel:.6f}",
+                        f"{x_vel_error:.6f}",
+                        f"{y_vel_error:.6f}",
+                        str(int(use_velocity_tracking_mode)),
                         "" if x_control_mode is None else str(x_control_mode),
                         "" if x_input_mode is None else str(x_input_mode),
                         "" if y_control_mode is None else str(y_control_mode),
@@ -1886,6 +2289,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_acc:.6f}",
                         f"{cmd_x_vel_ff:.6f}",
                         f"{cmd_y_vel_ff:.6f}",
+                        f"{cmd_x_vel_sent:.6f}",
+                        f"{cmd_y_vel_sent:.6f}",
+                        f"{x_actual_vel_raw:.6f}",
+                        f"{y_actual_vel_raw:.6f}",
+                        f"{x_actual_vel:.6f}",
+                        f"{y_actual_vel:.6f}",
+                        f"{x_vel_error:.6f}",
+                        f"{y_vel_error:.6f}",
+                        str(int(use_velocity_tracking_mode)),
                         prepoint_status,
                     ]
                 )
@@ -1904,6 +2316,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             if self.control:
                 try:
                     self.control.exit_tracking_mode_all()
+                except Exception:
+                    pass
+                try:
+                    self.control.exit_velocity_mode_all()
                 except Exception:
                     pass
                 if self.preposition_gains:

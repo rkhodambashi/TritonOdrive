@@ -14,9 +14,10 @@ MAX_DEGREE = 90
 MIN_DEGREE = -90
 TRACKING_MAX_DEGREE = 91
 TRACKING_MIN_DEGREE = -91
+SPI_SAFETY_POLL_INTERVAL_SEC = 0.02
 
 X_SPI_HOME_RAW = 0.376205 #0.367891 #0.4863780736923218
-Y_SPI_HOME_RAW = 0.173497 #0.4863780736923218
+Y_SPI_HOME_RAW = 0.176057 #0.173497 #0.4863780736923218
 GO_TO_HOME_ON_STARTUP = True
 
 DEFAULT_POS_GAIN = 50.0
@@ -61,6 +62,13 @@ AXIS_STATE = {
         "tracking_prev_control_mode": None,
         "tracking_prev_input_filter_bandwidth": None,
         "tracking_mode_active": False,
+        "velocity_prev_input_mode": None,
+        "velocity_prev_control_mode": None,
+        "velocity_prev_input_filter_bandwidth": None,
+        "velocity_prev_vel_ramp_rate": None,
+        "velocity_mode_active": False,
+        "safety_tripped": False,
+        "safety_trip_reason": None,
     }
     for axis in AXIS_CONFIG
 }
@@ -74,6 +82,8 @@ spi_home_offset = None
 spi_home_offset_y = None
 startup_motor_pos = None
 startup_motor_pos_y = None
+_safety_monitor_thread = None
+_safety_monitor_stop_event = threading.Event()
 
 
 def raw_to_output_deg(raw, home_offset):
@@ -117,6 +127,36 @@ def _get_state(axis="x"):
     if state["odrive"] is None:
         raise RuntimeError(f"{axis.upper()} axis ODrive is not initialized")
     return state
+
+
+def _ensure_safe_to_command(axis="x"):
+    state = _get_state(axis)
+    if state["safety_tripped"]:
+        reason = state["safety_trip_reason"] or f"{axis.upper()} axis safety trip is active"
+        raise RuntimeError(reason)
+    return state
+
+
+def clear_safety_trip(axis="x"):
+    state = _get_state(axis)
+    state["safety_tripped"] = False
+    state["safety_trip_reason"] = None
+
+
+def clear_safety_trip_all():
+    for axis in AXIS_CONFIG:
+        if AXIS_STATE[axis]["odrive"] is not None:
+            clear_safety_trip(axis=axis)
+
+
+def get_safety_trip_reason(axis="x"):
+    state = _get_state(axis)
+    return state["safety_trip_reason"]
+
+
+def is_safety_tripped(axis="x"):
+    state = _get_state(axis)
+    return bool(state["safety_tripped"])
 
 
 def get_serial_number(axis="x"):
@@ -164,6 +204,67 @@ def get_procedure_result(axis="x"):
     return int(_get_state(axis)["odrive"].axis0.procedure_result)
 
 
+def _trip_safety(axis, spi_pos_deg):
+    state = _get_state(axis)
+    if state["safety_tripped"]:
+        return
+
+    axis0 = state["odrive"].axis0
+    current_motor_pos = axis0.pos_vel_mapper.pos_rel
+    reason = (
+        f"{axis.upper()} axis SPI safety trip: {spi_pos_deg:.3f} deg outside "
+        f"[{TRACKING_MIN_DEGREE:.1f}, {TRACKING_MAX_DEGREE:.1f}]"
+    )
+
+    try:
+        axis0.controller.config.control_mode = 3
+        axis0.controller.config.input_mode = 1
+    except Exception:
+        pass
+    try:
+        axis0.controller.input_vel = 0.0
+    except Exception:
+        pass
+    try:
+        axis0.controller.input_pos = current_motor_pos
+    except Exception:
+        pass
+    try:
+        axis0.requested_state = 8
+    except Exception:
+        pass
+
+    state["tracking_mode_active"] = False
+    state["velocity_mode_active"] = False
+    state["safety_tripped"] = True
+    state["safety_trip_reason"] = reason
+    print(reason)
+
+
+def _spi_safety_monitor_loop():
+    while not _safety_monitor_stop_event.is_set():
+        for axis in AXIS_CONFIG:
+            state = AXIS_STATE[axis]
+            if state["odrive"] is None:
+                continue
+            try:
+                spi_pos_deg = get_spi_position(axis)
+            except Exception:
+                continue
+            if spi_pos_deg < TRACKING_MIN_DEGREE or spi_pos_deg > TRACKING_MAX_DEGREE:
+                _trip_safety(axis, spi_pos_deg)
+        _safety_monitor_stop_event.wait(SPI_SAFETY_POLL_INTERVAL_SEC)
+
+
+def _ensure_spi_safety_monitor_running():
+    global _safety_monitor_thread
+    if _safety_monitor_thread is not None and _safety_monitor_thread.is_alive():
+        return
+    _safety_monitor_stop_event.clear()
+    _safety_monitor_thread = threading.Thread(target=_spi_safety_monitor_loop, daemon=True)
+    _safety_monitor_thread.start()
+
+
 def initialize(odrive_instance, axis="x"):
     _validate_axis(axis)
 
@@ -206,8 +307,11 @@ def initialize(odrive_instance, axis="x"):
 
     state["motor_home"] = motor_home
     state["spi_home_offset"] = odrive_instance.spi_encoder0.raw
+    state["safety_tripped"] = False
+    state["safety_trip_reason"] = None
 
     _sync_legacy_globals()
+    _ensure_spi_safety_monitor_running()
 
     if GO_TO_HOME_ON_STARTUP:
         go_home(axis=axis)
@@ -263,14 +367,14 @@ def wait_until_settled(target_motor_turns, axis="x", target_output_deg=None):
 
 
 def go_home(axis="x"):
-    state = _get_state(axis)
+    state = _ensure_safe_to_command(axis)
     state["odrive"].axis0.requested_state = 8
     state["odrive"].axis0.controller.input_pos = state["motor_home"]
     wait_until_settled(state["motor_home"], axis=axis, target_output_deg=0.0)
 
 
 def move_absolute(target_output_deg, axis="x"):
-    state = _get_state(axis)
+    state = _ensure_safe_to_command(axis)
     output_sign = AXIS_CONFIG[axis]["output_sign"]
 
     if target_output_deg > MAX_DEGREE:
@@ -287,7 +391,7 @@ def move_absolute(target_output_deg, axis="x"):
 
 
 def command_absolute(target_output_deg, axis="x"):
-    state = _get_state(axis)
+    state = _ensure_safe_to_command(axis)
     output_sign = AXIS_CONFIG[axis]["output_sign"]
 
     if target_output_deg > MAX_DEGREE:
@@ -303,7 +407,7 @@ def command_absolute(target_output_deg, axis="x"):
 
 
 def command_absolute_with_velocity(target_output_deg, target_output_vel_deg_s=0.0, axis="x"):
-    state = _get_state(axis)
+    state = _ensure_safe_to_command(axis)
     output_sign = AXIS_CONFIG[axis]["output_sign"]
 
     if target_output_deg > TRACKING_MAX_DEGREE:
@@ -317,6 +421,15 @@ def command_absolute_with_velocity(target_output_deg, target_output_vel_deg_s=0.
 
     state["odrive"].axis0.requested_state = 8
     state["odrive"].axis0.controller.input_pos = target_motor_turns
+    state["odrive"].axis0.controller.input_vel = target_motor_vel_turns_s
+
+
+def command_velocity(target_output_vel_deg_s=0.0, axis="x"):
+    state = _ensure_safe_to_command(axis)
+    output_sign = AXIS_CONFIG[axis]["output_sign"]
+    target_motor_vel_turns_s = output_sign * target_output_vel_deg_s * GEAR_RATIO / 360.0
+
+    state["odrive"].axis0.requested_state = 8
     state["odrive"].axis0.controller.input_vel = target_motor_vel_turns_s
 
 
@@ -354,6 +467,13 @@ def set_traj_params(vel, acc, dec, axis="x"):
     state["odrive"].axis0.trap_traj.config.decel_limit = dec
 
 
+def set_velocity_ramp_rate(ramp_rate_deg_s2, axis="x"):
+    state = _get_state(axis)
+    output_sign = AXIS_CONFIG[axis]["output_sign"]
+    ramp_rate_motor_turns_s2 = abs(output_sign * ramp_rate_deg_s2 * GEAR_RATIO / 360.0)
+    state["odrive"].axis0.controller.config.vel_ramp_rate = ramp_rate_motor_turns_s2
+
+
 def enter_tracking_mode(axis="x", input_filter_bandwidth=None):
     state = _get_state(axis)
     if state["tracking_mode_active"]:
@@ -371,6 +491,29 @@ def enter_tracking_mode(axis="x", input_filter_bandwidth=None):
     axis0.controller.input_pos = current_motor_pos
     axis0.requested_state = 8
     state["tracking_mode_active"] = True
+
+
+def enter_velocity_mode(axis="x", input_filter_bandwidth=None, ramp_rate_deg_s2=None):
+    state = _get_state(axis)
+    if state["velocity_mode_active"]:
+        return
+
+    axis0 = state["odrive"].axis0
+    state["velocity_prev_control_mode"] = axis0.controller.config.control_mode
+    state["velocity_prev_input_mode"] = axis0.controller.config.input_mode
+    state["velocity_prev_input_filter_bandwidth"] = axis0.controller.config.input_filter_bandwidth
+    state["velocity_prev_vel_ramp_rate"] = axis0.controller.config.vel_ramp_rate
+    axis0.controller.config.control_mode = 2
+    if ramp_rate_deg_s2 is not None and ramp_rate_deg_s2 > 0.0:
+        set_velocity_ramp_rate(ramp_rate_deg_s2, axis=axis)
+        axis0.controller.config.input_mode = 2
+    else:
+        axis0.controller.config.input_mode = 1
+    if input_filter_bandwidth is not None:
+        axis0.controller.config.input_filter_bandwidth = input_filter_bandwidth
+    axis0.controller.input_vel = 0.0
+    axis0.requested_state = 8
+    state["velocity_mode_active"] = True
 
 
 def exit_tracking_mode(axis="x"):
@@ -392,6 +535,29 @@ def exit_tracking_mode(axis="x"):
     state["tracking_prev_input_mode"] = None
     state["tracking_prev_input_filter_bandwidth"] = None
     state["tracking_mode_active"] = False
+
+
+def exit_velocity_mode(axis="x"):
+    state = _get_state(axis)
+    if not state["velocity_mode_active"]:
+        return
+
+    axis0 = state["odrive"].axis0
+    if state["velocity_prev_control_mode"] is not None:
+        axis0.controller.config.control_mode = state["velocity_prev_control_mode"]
+    if state["velocity_prev_input_mode"] is not None:
+        axis0.controller.config.input_mode = state["velocity_prev_input_mode"]
+    if state["velocity_prev_input_filter_bandwidth"] is not None:
+        axis0.controller.config.input_filter_bandwidth = state["velocity_prev_input_filter_bandwidth"]
+    if state["velocity_prev_vel_ramp_rate"] is not None:
+        axis0.controller.config.vel_ramp_rate = state["velocity_prev_vel_ramp_rate"]
+    axis0.controller.input_vel = 0.0
+    axis0.requested_state = 8
+    state["velocity_prev_control_mode"] = None
+    state["velocity_prev_input_mode"] = None
+    state["velocity_prev_input_filter_bandwidth"] = None
+    state["velocity_prev_vel_ramp_rate"] = None
+    state["velocity_mode_active"] = False
 
 
 def _run_parallel(calls):
@@ -443,6 +609,11 @@ def command_absolute_pair_with_velocity(x_deg=None, y_deg=None, x_vel_deg_s=0.0,
         command_absolute_with_velocity(y_deg, target_output_vel_deg_s=y_vel_deg_s, axis="y")
 
 
+def command_velocity_pair(x_vel_deg_s=0.0, y_vel_deg_s=0.0):
+    command_velocity(x_vel_deg_s, axis="x")
+    command_velocity(y_vel_deg_s, axis="y")
+
+
 def move_relative_pair(x_delta=None, y_delta=None):
     calls = []
     if x_delta is not None:
@@ -467,9 +638,23 @@ def enter_tracking_mode_all(input_filter_bandwidth=None):
         enter_tracking_mode(axis=axis, input_filter_bandwidth=input_filter_bandwidth)
 
 
+def enter_velocity_mode_all(input_filter_bandwidth=None, ramp_rate_deg_s2=None):
+    for axis in AXIS_CONFIG:
+        enter_velocity_mode(
+            axis=axis,
+            input_filter_bandwidth=input_filter_bandwidth,
+            ramp_rate_deg_s2=ramp_rate_deg_s2,
+        )
+
+
 def exit_tracking_mode_all():
     for axis in AXIS_CONFIG:
         exit_tracking_mode(axis=axis)
+
+
+def exit_velocity_mode_all():
+    for axis in AXIS_CONFIG:
+        exit_velocity_mode(axis=axis)
 
 
 def disarm_all():

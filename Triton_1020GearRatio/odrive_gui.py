@@ -17,6 +17,10 @@ from matplotlib.figure import Figure
 axis_devices = {"x": None, "y": None}
 
 logging_active = False
+velocity_ramp_stop_event = threading.Event()
+velocity_ramp_thread = None
+SAFE_VELOCITY_RAMP_MAX_DEG_S = 6.0
+VELOCITY_RAMP_LIMIT_MARGIN_DEG = 1.0
 
 log_time = []
 log_x_cmd_deg = []
@@ -177,6 +181,110 @@ def move_absolute(axis, entry):
         ).start()
     except Exception:
         pass
+
+
+def start_velocity_ramp_test():
+    global velocity_ramp_thread
+    if velocity_ramp_thread is not None and velocity_ramp_thread.is_alive():
+        return
+
+    try:
+        axis = velocity_axis_var.get()
+        vel_1 = float(vel_start_entry.get())
+        vel_2 = float(vel_target_entry.get())
+        hold_v1 = float(vel_hold_v1_entry.get())
+        hold_after = float(vel_hold_after_entry.get())
+        native_ramp_rate = float(vel_native_ramp_entry.get())
+        if axis not in ("x", "y"):
+            raise ValueError
+        if hold_v1 < 0 or hold_after < 0 or native_ramp_rate < 0:
+            raise ValueError
+    except Exception:
+        status_label.config(text="Velocity ramp inputs invalid")
+        return
+
+    vel_1 = max(min(vel_1, SAFE_VELOCITY_RAMP_MAX_DEG_S), -SAFE_VELOCITY_RAMP_MAX_DEG_S)
+    vel_2 = max(min(vel_2, SAFE_VELOCITY_RAMP_MAX_DEG_S), -SAFE_VELOCITY_RAMP_MAX_DEG_S)
+
+    def axis_within_safe_travel():
+        pos = _safe_call(lambda: control.get_spi_position(axis), None)
+        if pos is None:
+            pos = _safe_call(lambda: control.get_current_position(axis), None)
+        if pos is None:
+            return True
+        if pos >= control.TRACKING_MAX_DEGREE - VELOCITY_RAMP_LIMIT_MARGIN_DEG and max(vel_1, vel_2) > 0:
+            return False
+        if pos <= control.TRACKING_MIN_DEGREE + VELOCITY_RAMP_LIMIT_MARGIN_DEG and min(vel_1, vel_2) < 0:
+            return False
+        return True
+
+    def command_with_limit_check(commanded_vel):
+        if not axis_within_safe_travel():
+            raise RuntimeError(
+                f"{axis.upper()} reached travel safety boundary near "
+                f"{control.TRACKING_MIN_DEGREE}/{control.TRACKING_MAX_DEGREE} deg"
+            )
+        control.command_velocity(commanded_vel, axis=axis)
+
+    def worker():
+        step_dt = 0.02
+        velocity_ramp_stop_event.clear()
+        try:
+            control.enter_velocity_mode(
+                axis=axis,
+                ramp_rate_deg_s2=native_ramp_rate if native_ramp_rate > 0.0 else None,
+            )
+            command_with_limit_check(vel_1)
+            hold_v1_start = time.monotonic()
+            while not velocity_ramp_stop_event.is_set() and time.monotonic() - hold_v1_start < hold_v1:
+                command_with_limit_check(vel_1)
+                time.sleep(step_dt)
+
+            if not velocity_ramp_stop_event.is_set():
+                command_with_limit_check(vel_2)
+
+            final_start = time.monotonic()
+            while not velocity_ramp_stop_event.is_set() and time.monotonic() - final_start < hold_after:
+                command_with_limit_check(vel_2)
+                time.sleep(step_dt)
+        except Exception as exc:
+            status_label.config(text=f"Velocity ramp failed: {exc}")
+        finally:
+            try:
+                control.command_velocity(0.0, axis=axis)
+            except Exception:
+                pass
+            try:
+                control.exit_velocity_mode(axis=axis)
+            except Exception:
+                pass
+            try:
+                control.go_home(axis=axis)
+            except Exception:
+                pass
+            if not velocity_ramp_stop_event.is_set():
+                status_label.config(
+                    text=(
+                        f"Velocity step complete ({axis.upper()}): "
+                        f"{vel_1:.2f} -> {vel_2:.2f} deg/s"
+                    )
+                )
+
+    status_label.config(
+        text=(
+            f"Velocity step test running ({axis.upper()}): "
+            f"{vel_1:.2f} -> {vel_2:.2f} deg/s "
+            f"(clamped to +/-{SAFE_VELOCITY_RAMP_MAX_DEG_S:.1f}, "
+            f"native ramp {'off' if native_ramp_rate <= 0 else f'{native_ramp_rate:.2f} deg/s^2'})"
+        )
+    )
+    velocity_ramp_thread = threading.Thread(target=worker, daemon=True)
+    velocity_ramp_thread.start()
+
+
+def stop_velocity_ramp_test():
+    velocity_ramp_stop_event.set()
+    status_label.config(text="Velocity ramp stopping...")
 
 
 def apply_gains():
@@ -647,7 +755,7 @@ pos_gain_entry_small_y.grid(row=6, column=3)
 
 ttk.Label(gains_frame, text="Velocity Gain").grid(row=7, column=2)
 vel_gain_entry_small_y = ttk.Entry(gains_frame, width=8)
-vel_gain_entry_small_y.insert(0, "0.3")
+vel_gain_entry_small_y.insert(0, "1")
 vel_gain_entry_small_y.grid(row=7, column=3)
 
 ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=8, column=2)
@@ -760,6 +868,57 @@ def apply_azel():
 
 ttk.Button(left_frame, text="Point using AZ/EL", command=apply_azel).pack(pady=5)
 ttk.Button(left_frame, text="Open Manual Pointing Window", command=open_manual_pointing).pack(pady=5)
+
+ttk.Separator(left_frame).pack(fill="x", pady=10)
+
+ttk.Label(left_frame, text="Velocity Step Test").pack(pady=5)
+
+vel_ramp_frame = ttk.Frame(left_frame)
+vel_ramp_frame.pack(fill="x")
+
+ttk.Label(vel_ramp_frame, text="Axis").grid(row=0, column=0, padx=4, pady=2, sticky="w")
+velocity_axis_var = tk.StringVar(value="x")
+ttk.Combobox(vel_ramp_frame, textvariable=velocity_axis_var, values=("x", "y"), state="readonly", width=6).grid(row=0, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="Vel 1").grid(row=1, column=0, padx=4, pady=2, sticky="w")
+vel_start_entry = ttk.Entry(vel_ramp_frame, width=8)
+vel_start_entry.insert(0, "0.2")
+vel_start_entry.grid(row=1, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="Vel 2").grid(row=2, column=0, padx=4, pady=2, sticky="w")
+vel_target_entry = ttk.Entry(vel_ramp_frame, width=8)
+vel_target_entry.insert(0, "0.8")
+vel_target_entry.grid(row=2, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="Hold V1 (s)").grid(row=3, column=0, padx=4, pady=2, sticky="w")
+vel_hold_v1_entry = ttk.Entry(vel_ramp_frame, width=8)
+vel_hold_v1_entry.insert(0, "2")
+vel_hold_v1_entry.grid(row=3, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="Hold V2 (s)").grid(row=4, column=0, padx=4, pady=2, sticky="w")
+vel_hold_after_entry = ttk.Entry(vel_ramp_frame, width=8)
+vel_hold_after_entry.insert(0, "2")
+vel_hold_after_entry.grid(row=4, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="Native Ramp").grid(row=5, column=0, padx=4, pady=2, sticky="w")
+vel_native_ramp_entry = ttk.Entry(vel_ramp_frame, width=8)
+vel_native_ramp_entry.insert(0, "0")
+vel_native_ramp_entry.grid(row=5, column=1, padx=4, pady=2)
+
+ttk.Label(vel_ramp_frame, text="deg/s^2 (0 = off)").grid(row=5, column=2, padx=4, pady=2, sticky="w")
+
+ttk.Label(
+    vel_ramp_frame,
+    text=(
+        f"Safety: +/-{SAFE_VELOCITY_RAMP_MAX_DEG_S:.1f} deg/s, "
+        f"stop near +/-{control.TRACKING_MAX_DEGREE:.0f} deg"
+    ),
+).grid(row=7, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="w")
+
+vel_ramp_button_row = ttk.Frame(left_frame)
+vel_ramp_button_row.pack(pady=(4, 0))
+ttk.Button(vel_ramp_button_row, text="Start Vel Step", command=start_velocity_ramp_test).pack(side="left", padx=4)
+ttk.Button(vel_ramp_button_row, text="Stop Vel Step", command=stop_velocity_ramp_test).pack(side="left", padx=4)
 
 plot_frame = LivePlotFrame(right_frame)
 plot_frame.pack(fill="both", expand=True)
