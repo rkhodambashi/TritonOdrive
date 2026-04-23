@@ -712,7 +712,7 @@ ttk.Button(gains_frame, text="Apply Preposition Gains", command=apply_gains).gri
 
 ttk.Label(gains_frame, text="Position Gain").grid(row=1, column=2, padx=10)
 pos_gain_entry_small = ttk.Entry(gains_frame, width=8)
-pos_gain_entry_small.insert(0, "2")
+pos_gain_entry_small.insert(0, "0.05")
 pos_gain_entry_small.grid(row=1, column=3)
 
 ttk.Label(gains_frame, text="Velocity Gain").grid(row=2, column=2)
@@ -722,7 +722,7 @@ vel_gain_entry_small.grid(row=2, column=3)
 
 ttk.Label(gains_frame, text="Velocity Integrator Gain").grid(row=3, column=2)
 vel_i_entry_small = ttk.Entry(gains_frame, width=8)
-vel_i_entry_small.insert(0, "1")
+vel_i_entry_small.insert(0, "0.1")
 vel_i_entry_small.grid(row=3, column=3)
 
 ttk.Button(gains_frame, text="Apply Tracking Gains", command=apply_gains_small).grid(row=4, column=2, columnspan=2, pady=5)
