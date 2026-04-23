@@ -10,6 +10,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
+from odrive import enums as odrive_enums
 from skyfield.api import EarthSatellite, Topos, load, utc
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -87,9 +88,21 @@ TRACK_X_MOTOR_VEL_GAIN_RAMP_IN_SEC = 4.0
 TRACK_X_VEL_FF_ATTENUATE_START_DEG = 85.0
 TRACK_X_VEL_FF_ATTENUATE_STOP_DEG = 89.5
 
+ENCODER_ID_NAMES = {
+    value: name
+    for name, value in vars(odrive_enums).items()
+    if name.startswith("ENCODER_ID_") and isinstance(value, int)
+}
+
 
 def get_local_timezone():
     return datetime.datetime.now().astimezone().tzinfo
+
+
+def encoder_id_to_name(encoder_id):
+    if encoder_id is None:
+        return None
+    return ENCODER_ID_NAMES.get(int(encoder_id), f"ENCODER_ID_UNKNOWN_{int(encoder_id)}")
 
 
 def format_local_datetime(dt_utc, include_seconds=False):
@@ -1611,6 +1624,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "x_input_mode",
                 "y_control_mode",
                 "y_input_mode",
+                "x_load_encoder_id",
+                "x_load_encoder_name",
+                "x_commutation_encoder_id",
+                "x_commutation_encoder_name",
+                "x_use_commutation_vel",
+                "x_use_load_encoder_for_commutation_vel",
+                "x_pos_vel_mapper_scale",
+                "y_load_encoder_id",
+                "y_load_encoder_name",
+                "y_commutation_encoder_id",
+                "y_commutation_encoder_name",
+                "y_use_commutation_vel",
+                "y_use_load_encoder_for_commutation_vel",
+                "y_pos_vel_mapper_scale",
                 "x_controller_vel_limit",
                 "y_controller_vel_limit",
                 "x_traj_vel_limit",
@@ -1686,6 +1713,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "x_vel_error_deg_per_s",
                 "y_vel_error_deg_per_s",
                 "velocity_mode_active",
+                "x_load_encoder_id",
+                "x_load_encoder_name",
+                "x_commutation_encoder_id",
+                "x_commutation_encoder_name",
+                "x_use_commutation_vel",
+                "x_use_load_encoder_for_commutation_vel",
+                "x_pos_vel_mapper_scale",
+                "y_load_encoder_id",
+                "y_load_encoder_name",
+                "y_commutation_encoder_id",
+                "y_commutation_encoder_name",
+                "y_use_commutation_vel",
+                "y_use_load_encoder_for_commutation_vel",
+                "y_pos_vel_mapper_scale",
                 "status",
             ]
         )
@@ -2005,6 +2046,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 x_input_mode = None
                 y_control_mode = None
                 y_input_mode = None
+                x_load_encoder_id = None
+                x_load_encoder_name = None
+                x_commutation_encoder_id = None
+                x_commutation_encoder_name = None
+                x_use_commutation_vel = None
+                x_use_load_encoder_for_commutation_vel = None
+                x_pos_vel_mapper_scale = None
+                y_load_encoder_id = None
+                y_load_encoder_name = None
+                y_commutation_encoder_id = None
+                y_commutation_encoder_name = None
+                y_use_commutation_vel = None
+                y_use_load_encoder_for_commutation_vel = None
+                y_pos_vel_mapper_scale = None
                 x_controller_vel_limit = None
                 y_controller_vel_limit = None
                 x_traj_vel_limit = None
@@ -2022,6 +2077,24 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         x_input_mode = int(x_axis0.controller.config.input_mode)
                         y_control_mode = int(y_axis0.controller.config.control_mode)
                         y_input_mode = int(y_axis0.controller.config.input_mode)
+                        x_load_encoder_id = int(x_axis0.config.load_encoder)
+                        x_load_encoder_name = encoder_id_to_name(x_load_encoder_id)
+                        x_commutation_encoder_id = int(x_axis0.config.commutation_encoder)
+                        x_commutation_encoder_name = encoder_id_to_name(x_commutation_encoder_id)
+                        x_use_commutation_vel = int(bool(x_axis0.controller.config.use_commutation_vel))
+                        x_use_load_encoder_for_commutation_vel = int(
+                            bool(x_axis0.controller.config.use_load_encoder_for_commutation_vel)
+                        )
+                        x_pos_vel_mapper_scale = float(x_axis0.pos_vel_mapper.config.scale)
+                        y_load_encoder_id = int(y_axis0.config.load_encoder)
+                        y_load_encoder_name = encoder_id_to_name(y_load_encoder_id)
+                        y_commutation_encoder_id = int(y_axis0.config.commutation_encoder)
+                        y_commutation_encoder_name = encoder_id_to_name(y_commutation_encoder_id)
+                        y_use_commutation_vel = int(bool(y_axis0.controller.config.use_commutation_vel))
+                        y_use_load_encoder_for_commutation_vel = int(
+                            bool(y_axis0.controller.config.use_load_encoder_for_commutation_vel)
+                        )
+                        y_pos_vel_mapper_scale = float(y_axis0.pos_vel_mapper.config.scale)
                         x_controller_vel_limit = float(x_axis0.controller.config.vel_limit)
                         y_controller_vel_limit = float(y_axis0.controller.config.vel_limit)
                         x_traj_vel_limit = float(x_axis0.trap_traj.config.vel_limit)
@@ -2553,6 +2626,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         "" if x_input_mode is None else str(x_input_mode),
                         "" if y_control_mode is None else str(y_control_mode),
                         "" if y_input_mode is None else str(y_input_mode),
+                        "" if x_load_encoder_id is None else str(x_load_encoder_id),
+                        "" if x_load_encoder_name is None else x_load_encoder_name,
+                        "" if x_commutation_encoder_id is None else str(x_commutation_encoder_id),
+                        "" if x_commutation_encoder_name is None else x_commutation_encoder_name,
+                        "" if x_use_commutation_vel is None else str(x_use_commutation_vel),
+                        "" if x_use_load_encoder_for_commutation_vel is None else str(x_use_load_encoder_for_commutation_vel),
+                        "" if x_pos_vel_mapper_scale is None else f"{x_pos_vel_mapper_scale:.6f}",
+                        "" if y_load_encoder_id is None else str(y_load_encoder_id),
+                        "" if y_load_encoder_name is None else y_load_encoder_name,
+                        "" if y_commutation_encoder_id is None else str(y_commutation_encoder_id),
+                        "" if y_commutation_encoder_name is None else y_commutation_encoder_name,
+                        "" if y_use_commutation_vel is None else str(y_use_commutation_vel),
+                        "" if y_use_load_encoder_for_commutation_vel is None else str(y_use_load_encoder_for_commutation_vel),
+                        "" if y_pos_vel_mapper_scale is None else f"{y_pos_vel_mapper_scale:.6f}",
                         "" if x_controller_vel_limit is None else f"{x_controller_vel_limit:.6f}",
                         "" if y_controller_vel_limit is None else f"{y_controller_vel_limit:.6f}",
                         "" if x_traj_vel_limit is None else f"{x_traj_vel_limit:.6f}",
@@ -2628,6 +2715,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{x_vel_error:.6f}",
                         f"{y_vel_error:.6f}",
                         str(int(use_velocity_tracking_mode)),
+                        "" if x_load_encoder_id is None else str(x_load_encoder_id),
+                        "" if x_load_encoder_name is None else x_load_encoder_name,
+                        "" if x_commutation_encoder_id is None else str(x_commutation_encoder_id),
+                        "" if x_commutation_encoder_name is None else x_commutation_encoder_name,
+                        "" if x_use_commutation_vel is None else str(x_use_commutation_vel),
+                        "" if x_use_load_encoder_for_commutation_vel is None else str(x_use_load_encoder_for_commutation_vel),
+                        "" if x_pos_vel_mapper_scale is None else f"{x_pos_vel_mapper_scale:.6f}",
+                        "" if y_load_encoder_id is None else str(y_load_encoder_id),
+                        "" if y_load_encoder_name is None else y_load_encoder_name,
+                        "" if y_commutation_encoder_id is None else str(y_commutation_encoder_id),
+                        "" if y_commutation_encoder_name is None else y_commutation_encoder_name,
+                        "" if y_use_commutation_vel is None else str(y_use_commutation_vel),
+                        "" if y_use_load_encoder_for_commutation_vel is None else str(y_use_load_encoder_for_commutation_vel),
+                        "" if y_pos_vel_mapper_scale is None else f"{y_pos_vel_mapper_scale:.6f}",
                         prepoint_status,
                     ]
                 )
