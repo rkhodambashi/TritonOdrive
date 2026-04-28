@@ -54,32 +54,41 @@ TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X = 0.5
 TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y = 0.15
 TRACK_VELOCITY_POSITION_GAIN_X = 10.0
 TRACK_VELOCITY_POSITION_GAIN_Y = 10.0
-TRACK_VELOCITY_INTEGRAL_GAIN_X = 1.5
-TRACK_VELOCITY_INTEGRAL_GAIN_Y = 1.5
+TRACK_X_POSITION_GAIN_VEL_LOW_DEG_S = 0.2
+TRACK_X_POSITION_GAIN_VEL_HIGH_DEG_S = 2.0
+TRACK_X_POSITION_GAIN_SCALE_LOW = 1.0
+TRACK_X_POSITION_GAIN_SCALE_HIGH = 0.5
+TRACK_VELOCITY_INTEGRAL_GAIN_X = 0.0
+TRACK_VELOCITY_INTEGRAL_GAIN_Y = 0.0
 TRACK_VELOCITY_INTEGRAL_MAX_STATE_X = 10.0
 TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y = 10.0
-TRACK_VELOCITY_ERROR_GAIN_X = 0.4
-TRACK_VELOCITY_ERROR_GAIN_Y = 0.4
-TRACK_X_DAMPING_GAIN_LOW = 1.2
-TRACK_X_DAMPING_GAIN_MID = 0.8
-TRACK_X_DAMPING_GAIN_HIGH = 0.4
+TRACK_VELOCITY_ERROR_GAIN_X = 0.0
+TRACK_VELOCITY_ERROR_GAIN_Y = 0.0
+TRACK_X_DAMPING_GAIN_LOW = 1.0
+TRACK_X_DAMPING_GAIN_MID = 1.0
+TRACK_X_DAMPING_GAIN_HIGH = 1.0
 TRACK_X_DAMPING_ANGLE_LOW = 20.0
 TRACK_X_DAMPING_ANGLE_HIGH = 40.0
-TRACK_SPI_VELOCITY_FILTER_ALPHA_X = 0.7
-TRACK_SPI_VELOCITY_FILTER_ALPHA_Y = 0.7
+TRACK_SPI_ENCODER_BITS = 23
+TRACK_SPI_POSITION_FILTER_ALPHA_X = 0.0
+TRACK_SPI_POSITION_FILTER_ALPHA_Y = 0.0
+TRACK_SPI_POSITION_SKIP_BITS_X = 0
+TRACK_SPI_POSITION_SKIP_BITS_Y = 0
+TRACK_SPI_VELOCITY_FILTER_ALPHA_X = 0.0
+TRACK_SPI_VELOCITY_FILTER_ALPHA_Y = 0.0
 TRACK_VELOCITY_COMMAND_MAX_X = 100.0
 TRACK_VELOCITY_COMMAND_MAX_Y = 100.0
-TRACK_VELOCITY_RAMP_RATE_DEG_S2 = 0.0
-TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X = 0.0
-TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y = 0.0
+TRACK_VELOCITY_RAMP_RATE_DEG_S2 = 5.0
+TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X = 0.2
+TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y = 0.2
 TRACK_VELOCITY_CONTROLLER_MODE = "full"
 TRACK_VELOCITY_DEBUG_SCALE = 1.0
-TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW = 0.3
+TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW = 0.4
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_MID = 0.8
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_HIGH = 1.5
-TRACK_X_MOTOR_VEL_GAIN_AWAY_LOW = 0.3
-TRACK_X_MOTOR_VEL_GAIN_AWAY_MID = 1.0
-TRACK_X_MOTOR_VEL_GAIN_AWAY_HIGH = 2.0
+TRACK_X_MOTOR_VEL_GAIN_AWAY_LOW = 0.1
+TRACK_X_MOTOR_VEL_GAIN_AWAY_MID = 0.3
+TRACK_X_MOTOR_VEL_GAIN_AWAY_HIGH = 1.0
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_ANGLE_LOW = 55.0
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_ANGLE_HIGH = 85.0
 TRACK_X_MOTOR_VEL_GAIN_AWAY_ANGLE_LOW = 55.0
@@ -225,6 +234,27 @@ def scheduled_x_motor_vel_gain(x_angle_deg, low_gain, mid_gain, high_gain, low_a
     if abs_x_angle_deg < high_angle_deg:
         return mid_gain
     return high_gain
+
+
+def scheduled_velocity_scale(abs_velocity_deg_s, low_scale, high_scale, low_velocity_deg_s, high_velocity_deg_s):
+    if abs_velocity_deg_s <= low_velocity_deg_s:
+        return low_scale
+    if abs_velocity_deg_s >= high_velocity_deg_s:
+        return high_scale
+
+    span_deg_s = high_velocity_deg_s - low_velocity_deg_s
+    alpha = (abs_velocity_deg_s - low_velocity_deg_s) / span_deg_s
+    return blend_value(low_scale, high_scale, alpha)
+
+
+def quantize_spi_position_deg(position_deg, skip_bits):
+    skip_bits = int(skip_bits)
+    if skip_bits <= 0:
+        return position_deg
+
+    effective_bits = TRACK_SPI_ENCODER_BITS - skip_bits
+    step_deg = 360.0 / float(1 << effective_bits)
+    return round(position_deg / step_deg) * step_deg
 
 
 def moving_toward_vertical(x_angle_deg, x_velocity_deg_s):
@@ -762,6 +792,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.min_trajectory_spacing_sec = MIN_TRAJECTORY_SPACING_SEC
         self.velocity_position_gain_x = TRACK_VELOCITY_POSITION_GAIN_X
         self.velocity_position_gain_y = TRACK_VELOCITY_POSITION_GAIN_Y
+        self.x_position_gain_vel_low_deg_s = TRACK_X_POSITION_GAIN_VEL_LOW_DEG_S
+        self.x_position_gain_vel_high_deg_s = TRACK_X_POSITION_GAIN_VEL_HIGH_DEG_S
+        self.x_position_gain_scale_low = TRACK_X_POSITION_GAIN_SCALE_LOW
+        self.x_position_gain_scale_high = TRACK_X_POSITION_GAIN_SCALE_HIGH
         self.velocity_integral_gain_x = TRACK_VELOCITY_INTEGRAL_GAIN_X
         self.velocity_integral_gain_y = TRACK_VELOCITY_INTEGRAL_GAIN_Y
         self.velocity_error_gain_x = TRACK_VELOCITY_ERROR_GAIN_X
@@ -771,6 +805,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.x_damping_gain_high = TRACK_X_DAMPING_GAIN_HIGH
         self.x_damping_angle_low = TRACK_X_DAMPING_ANGLE_LOW
         self.x_damping_angle_high = TRACK_X_DAMPING_ANGLE_HIGH
+        self.spi_position_filter_alpha_x = TRACK_SPI_POSITION_FILTER_ALPHA_X
+        self.spi_position_filter_alpha_y = TRACK_SPI_POSITION_FILTER_ALPHA_Y
+        self.spi_position_skip_bits_x = TRACK_SPI_POSITION_SKIP_BITS_X
+        self.spi_position_skip_bits_y = TRACK_SPI_POSITION_SKIP_BITS_Y
         self.spi_velocity_filter_alpha_x = TRACK_SPI_VELOCITY_FILTER_ALPHA_X
         self.spi_velocity_filter_alpha_y = TRACK_SPI_VELOCITY_FILTER_ALPHA_Y
         self.velocity_command_max_x = TRACK_VELOCITY_COMMAND_MAX_X
@@ -877,14 +915,18 @@ class SatelliteTrackingWindow(tk.Toplevel):
         tle_frame.columnconfigure(0, weight=0)
         tle_frame.columnconfigure(1, weight=1)
 
-        velocity_frame = ttk.LabelFrame(center_container, text="Velocity Mode Settings")
-        velocity_frame.pack(fill="x", expand=True, anchor="n", pady=(8, 0))
+        velocity_frame = ttk.LabelFrame(self, text="Velocity Mode Settings")
+        velocity_frame.pack(fill="x", expand=False, padx=10, pady=(0, 8))
 
         self.vel_controller_mode_var = tk.StringVar(value=self.velocity_controller_mode)
 
         velocity_fields = [
             ("Kp Pos X", "vel_pos_gain_x_entry", f"{self.velocity_position_gain_x:g}"),
             ("Kp Pos Y", "vel_pos_gain_y_entry", f"{self.velocity_position_gain_y:g}"),
+            ("Kp X Vel Low", "x_pos_gain_vel_low_entry", f"{self.x_position_gain_vel_low_deg_s:g}"),
+            ("Kp X Vel High", "x_pos_gain_vel_high_entry", f"{self.x_position_gain_vel_high_deg_s:g}"),
+            ("Kp X Scale Low", "x_pos_gain_scale_low_entry", f"{self.x_position_gain_scale_low:g}"),
+            ("Kp X Scale High", "x_pos_gain_scale_high_entry", f"{self.x_position_gain_scale_high:g}"),
             ("Ki X", "vel_int_gain_x_entry", f"{self.velocity_integral_gain_x:g}"),
             ("Ki Y", "vel_int_gain_y_entry", f"{self.velocity_integral_gain_y:g}"),
             ("Kd/Vel X", "vel_err_gain_x_entry", f"{self.velocity_error_gain_x:g}"),
@@ -894,6 +936,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             ("X Damp High", "x_damping_gain_high_entry", f"{self.x_damping_gain_high:g}"),
             ("X Damp Ang Low", "x_damping_angle_low_entry", f"{self.x_damping_angle_low:g}"),
             ("X Damp Ang High", "x_damping_angle_high_entry", f"{self.x_damping_angle_high:g}"),
+            ("Pos Alpha X", "pos_alpha_x_entry", f"{self.spi_position_filter_alpha_x:g}"),
+            ("Pos Alpha Y", "pos_alpha_y_entry", f"{self.spi_position_filter_alpha_y:g}"),
+            ("SPI Skip X", "spi_skip_bits_x_entry", f"{self.spi_position_skip_bits_x:g}"),
+            ("SPI Skip Y", "spi_skip_bits_y_entry", f"{self.spi_position_skip_bits_y:g}"),
             ("Vel Alpha X", "vel_alpha_x_entry", f"{self.spi_velocity_filter_alpha_x:g}"),
             ("Vel Alpha Y", "vel_alpha_y_entry", f"{self.spi_velocity_filter_alpha_y:g}"),
             ("Vel Max X", "vel_cmd_max_x_entry", f"{self.velocity_command_max_x:g}"),
@@ -1115,6 +1161,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             prepoint_lead = float(self.prepoint_lead_entry.get())
             velocity_position_gain_x = float(self.vel_pos_gain_x_entry.get())
             velocity_position_gain_y = float(self.vel_pos_gain_y_entry.get())
+            x_position_gain_vel_low_deg_s = float(self.x_pos_gain_vel_low_entry.get())
+            x_position_gain_vel_high_deg_s = float(self.x_pos_gain_vel_high_entry.get())
+            x_position_gain_scale_low = float(self.x_pos_gain_scale_low_entry.get())
+            x_position_gain_scale_high = float(self.x_pos_gain_scale_high_entry.get())
             velocity_integral_gain_x = float(self.vel_int_gain_x_entry.get())
             velocity_integral_gain_y = float(self.vel_int_gain_y_entry.get())
             velocity_error_gain_x = float(self.vel_err_gain_x_entry.get())
@@ -1124,6 +1174,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             x_damping_gain_high = float(self.x_damping_gain_high_entry.get())
             x_damping_angle_low = float(self.x_damping_angle_low_entry.get())
             x_damping_angle_high = float(self.x_damping_angle_high_entry.get())
+            spi_position_filter_alpha_x = float(self.pos_alpha_x_entry.get())
+            spi_position_filter_alpha_y = float(self.pos_alpha_y_entry.get())
+            spi_position_skip_bits_x = int(float(self.spi_skip_bits_x_entry.get()))
+            spi_position_skip_bits_y = int(float(self.spi_skip_bits_y_entry.get()))
             spi_velocity_filter_alpha_x = float(self.vel_alpha_x_entry.get())
             spi_velocity_filter_alpha_y = float(self.vel_alpha_y_entry.get())
             velocity_command_max_x = float(self.vel_cmd_max_x_entry.get())
@@ -1162,11 +1216,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 or velocity_command_max_y <= 0
                 or velocity_ramp_rate_deg_s2 < 0
                 or velocity_debug_scale <= 0
+                or x_position_gain_vel_low_deg_s < 0
+                or x_position_gain_vel_high_deg_s < 0
+                or x_position_gain_scale_low < 0
+                or x_position_gain_scale_high < 0
                 or x_damping_gain_low < 0
                 or x_damping_gain_mid < 0
                 or x_damping_gain_high < 0
                 or x_damping_angle_low < 0
                 or x_damping_angle_high < 0
+                or spi_position_skip_bits_x < 0
+                or spi_position_skip_bits_y < 0
                 or x_motor_vel_gain_toward_low <= 0
                 or x_motor_vel_gain_toward_mid <= 0
                 or x_motor_vel_gain_toward_high <= 0
@@ -1194,7 +1254,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 raise ValueError
             if not (0.0 <= command_velocity_filter_alpha_y < 1.0):
                 raise ValueError
+            if x_position_gain_vel_low_deg_s >= x_position_gain_vel_high_deg_s:
+                raise ValueError
             if x_damping_angle_low >= x_damping_angle_high:
+                raise ValueError
+            if not (0.0 <= spi_position_filter_alpha_x < 1.0):
+                raise ValueError
+            if not (0.0 <= spi_position_filter_alpha_y < 1.0):
+                raise ValueError
+            if spi_position_skip_bits_x >= TRACK_SPI_ENCODER_BITS:
+                raise ValueError
+            if spi_position_skip_bits_y >= TRACK_SPI_ENCODER_BITS:
                 raise ValueError
             if x_motor_vel_gain_toward_angle_low >= x_motor_vel_gain_toward_angle_high:
                 raise ValueError
@@ -1215,6 +1285,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.prepoint_lead_time_sec = prepoint_lead
             self.velocity_position_gain_x = velocity_position_gain_x
             self.velocity_position_gain_y = velocity_position_gain_y
+            self.x_position_gain_vel_low_deg_s = x_position_gain_vel_low_deg_s
+            self.x_position_gain_vel_high_deg_s = x_position_gain_vel_high_deg_s
+            self.x_position_gain_scale_low = x_position_gain_scale_low
+            self.x_position_gain_scale_high = x_position_gain_scale_high
             self.velocity_integral_gain_x = velocity_integral_gain_x
             self.velocity_integral_gain_y = velocity_integral_gain_y
             self.velocity_error_gain_x = velocity_error_gain_x
@@ -1224,6 +1298,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.x_damping_gain_high = x_damping_gain_high
             self.x_damping_angle_low = x_damping_angle_low
             self.x_damping_angle_high = x_damping_angle_high
+            self.spi_position_filter_alpha_x = spi_position_filter_alpha_x
+            self.spi_position_filter_alpha_y = spi_position_filter_alpha_y
+            self.spi_position_skip_bits_x = spi_position_skip_bits_x
+            self.spi_position_skip_bits_y = spi_position_skip_bits_y
             self.spi_velocity_filter_alpha_x = spi_velocity_filter_alpha_x
             self.spi_velocity_filter_alpha_y = spi_velocity_filter_alpha_y
             self.velocity_command_max_x = velocity_command_max_x
@@ -1246,6 +1324,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.x_motor_vel_gain_away_angle_low = x_motor_vel_gain_away_angle_low
             self.x_motor_vel_gain_away_angle_high = x_motor_vel_gain_away_angle_high
             self.x_motor_vel_gain_ramp_in_sec = x_motor_vel_gain_ramp_in_sec
+            return True
         except Exception:
             messagebox.showerror(
                 "Error",
@@ -1259,6 +1338,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     "X damping angle low must be smaller than X damping angle high.\n"
                     "Velocity filter alpha must be in [0, 1).\n"
                     "Command velocity filter alpha must be in [0, 1).\n"
+                    "X Kp velocity low must be smaller than X Kp velocity high.\n"
+                    "X Kp velocity schedule values must be zero or positive.\n"
+                    "SPI position filter alpha must be in [0, 1).\n"
+                    f"SPI skipped bits must be integers from 0 to {TRACK_SPI_ENCODER_BITS - 1}.\n"
                     "Velocity command max and debug scale must be positive.\n"
                     "Velocity ramp must be zero or positive.\n"
                     "Toward and away X motor vel gain values must be positive.\n"
@@ -1266,6 +1349,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     "X gain ramp must be zero or positive."
                 ),
             )
+            return False
 
     def load_tle(self):
         file_path = filedialog.askopenfilename(filetypes=[("TLE Files", "*.txt"), ("All Files", "*.*")])
@@ -1383,6 +1467,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 self.sat_combobox.current(0)
 
     def start_tracking_thread(self):
+        if not self.apply_tracking_settings():
+            return
+
         if self.control:
             try:
                 safe_min_deg = getattr(self.control, "TRACKING_MIN_DEGREE", -91.0)
@@ -1614,6 +1701,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_actual_vel_raw_deg_per_s",
                 "x_actual_vel_deg_per_s",
                 "y_actual_vel_deg_per_s",
+                "x_position_gain_active",
                 "x_damping_gain_active",
                 "x_vel_error_deg_per_s",
                 "y_vel_error_deg_per_s",
@@ -1646,6 +1734,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_traj_vel_limit",
                 "y_traj_accel_limit",
                 "y_traj_decel_limit",
+                "x_actual_raw_deg",
+                "y_actual_raw_deg",
                 "x_actual_deg",
                 "y_actual_deg",
                 "x_cmd_error_deg",
@@ -1709,6 +1799,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_actual_vel_raw_deg_per_s",
                 "x_actual_vel_deg_per_s",
                 "y_actual_vel_deg_per_s",
+                "x_position_gain_active",
                 "x_damping_gain_active",
                 "x_vel_error_deg_per_s",
                 "y_vel_error_deg_per_s",
@@ -1765,9 +1856,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
         y_actual_vel_raw = 0.0
         x_actual_vel_filtered = 0.0
         y_actual_vel_filtered = 0.0
+        x_position_filtered = None
+        y_position_filtered = None
         x_command_vel_filtered = None
         y_command_vel_filtered = None
         x_motor_vel_gain_active = self.x_motor_vel_gain_toward_mid
+        x_position_gain_active = self.velocity_position_gain_x
         last_applied_x_motor_vel_gain = None
 
         def perf_to_utc(perf_value):
@@ -1782,6 +1876,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
             nonlocal prev_x_actual_elapsed_sec, prev_y_actual_elapsed_sec
             nonlocal x_actual_vel_raw, y_actual_vel_raw
             nonlocal x_actual_vel_filtered, y_actual_vel_filtered
+            nonlocal x_position_filtered, y_position_filtered
             nonlocal x_command_vel_filtered, y_command_vel_filtered
             nonlocal last_applied_x_motor_vel_gain
             if not self.control:
@@ -1820,6 +1915,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
             y_actual_vel_raw = 0.0
             x_actual_vel_filtered = 0.0
             y_actual_vel_filtered = 0.0
+            x_position_filtered = None
+            y_position_filtered = None
             x_command_vel_filtered = None
             y_command_vel_filtered = None
             last_applied_x_motor_vel_gain = None
@@ -2026,6 +2123,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 cmd_dy = 0.0 if last_display_command is None else cmd_y_angle - last_display_command[1]
                 x_actual = None
                 y_actual = None
+                x_actual_raw = None
+                y_actual_raw = None
                 x_actual_vel = 0.0
                 y_actual_vel = 0.0
                 x_vel_ref_now = 0.0
@@ -2106,11 +2205,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         control_snapshot_ms = (time.perf_counter() - control_snapshot_start) * 1000.0
                         spi_window_start = time.perf_counter()
                         spi_x_start = time.perf_counter()
-                        x_actual = self.control.get_spi_position("x")
+                        x_actual_raw = self.control.get_spi_position("x")
+                        x_actual_sample = quantize_spi_position_deg(x_actual_raw, self.spi_position_skip_bits_x)
+                        if x_position_filtered is None or self.spi_position_filter_alpha_x <= 0.0:
+                            x_position_filtered = x_actual_sample
+                        else:
+                            x_position_filtered = (
+                                self.spi_position_filter_alpha_x * x_position_filtered
+                                + (1.0 - self.spi_position_filter_alpha_x) * x_actual_sample
+                            )
+                        x_actual = x_position_filtered
                         spi_x_done = time.perf_counter()
                         spi_x_read_ms = (spi_x_done - spi_x_start) * 1000.0
                         spi_y_start = time.perf_counter()
-                        y_actual = self.control.get_spi_position("y")
+                        y_actual_raw = self.control.get_spi_position("y")
+                        y_actual_sample = quantize_spi_position_deg(y_actual_raw, self.spi_position_skip_bits_y)
+                        if y_position_filtered is None or self.spi_position_filter_alpha_y <= 0.0:
+                            y_position_filtered = y_actual_sample
+                        else:
+                            y_position_filtered = (
+                                self.spi_position_filter_alpha_y * y_position_filtered
+                                + (1.0 - self.spi_position_filter_alpha_y) * y_actual_sample
+                            )
+                        y_actual = y_position_filtered
                         spi_y_done = time.perf_counter()
                         spi_y_read_ms = (spi_y_done - spi_y_start) * 1000.0
                         spi_total_ms = (spi_y_done - spi_window_start) * 1000.0
@@ -2150,6 +2267,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             )
                             y_vel_ref_now = self.velocity_feedforward_scale_y * y_ideal_sample.get("y_vel", 0.0)
                             y_traj_error = ideal_y_angle - y_actual
+                        x_position_gain_active = self.velocity_position_gain_x * scheduled_velocity_scale(
+                            abs(x_vel_ref_now),
+                            self.x_position_gain_scale_low,
+                            self.x_position_gain_scale_high,
+                            self.x_position_gain_vel_low_deg_s,
+                            self.x_position_gain_vel_high_deg_s,
+                        )
                         if (
                             prev_x_actual_for_vel is not None
                             and prev_x_actual_elapsed_sec is not None
@@ -2192,6 +2316,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     except Exception:
                         x_actual = None
                         y_actual = None
+                        x_actual_raw = None
+                        y_actual_raw = None
 
                 track_ready = capture_error is not None and capture_error <= self.track_capture_error_deg
                 track_gate_open = sample["visible"] or pickup_window_active
@@ -2278,18 +2404,19 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         )
                         x_vel_error = x_vel_ref_now - x_actual_vel
                         y_vel_error = y_vel_ref_now - y_actual_vel
+                        x_vel_error_term = self.velocity_error_gain_x * x_damping_gain_active * x_vel_error
                         if self.velocity_controller_mode == "feedforward_only":
                             cmd_x_vel_sent = cmd_x_vel_ff
                             cmd_y_vel_sent = cmd_y_vel_ff
                         elif self.velocity_controller_mode == "velocity_error_only":
-                            cmd_x_vel_sent = cmd_x_vel_ff + x_damping_gain_active * x_vel_error
+                            cmd_x_vel_sent = cmd_x_vel_ff + x_vel_error_term
                             cmd_y_vel_sent = cmd_y_vel_ff + self.velocity_error_gain_y * y_vel_error
                         else:
                             cmd_x_vel_sent = (
                                 cmd_x_vel_ff
-                                + self.velocity_position_gain_x * x_traj_error
+                                + x_position_gain_active * x_traj_error
                                 + self.velocity_integral_gain_x * x_velocity_error_integral
-                                + x_damping_gain_active * x_vel_error
+                                + x_vel_error_term
                             )
                             cmd_y_vel_sent = (
                                 cmd_y_vel_ff
@@ -2616,6 +2743,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_actual_vel_raw:.6f}",
                         f"{x_actual_vel:.6f}",
                         f"{y_actual_vel:.6f}",
+                        f"{x_position_gain_active:.6f}",
                         f"{x_damping_gain_active:.6f}",
                         f"{x_vel_error:.6f}",
                         f"{y_vel_error:.6f}",
@@ -2648,6 +2776,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         "" if y_traj_vel_limit is None else f"{y_traj_vel_limit:.6f}",
                         "" if y_traj_accel_limit is None else f"{y_traj_accel_limit:.6f}",
                         "" if y_traj_decel_limit is None else f"{y_traj_decel_limit:.6f}",
+                        "" if x_actual_raw is None else f"{x_actual_raw:.6f}",
+                        "" if y_actual_raw is None else f"{y_actual_raw:.6f}",
                         "" if x_actual is None else f"{x_actual:.6f}",
                         "" if y_actual is None else f"{y_actual:.6f}",
                         f"{x_error:.6f}",
@@ -2711,6 +2841,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_actual_vel_raw:.6f}",
                         f"{x_actual_vel:.6f}",
                         f"{y_actual_vel:.6f}",
+                        f"{x_position_gain_active:.6f}",
                         f"{x_damping_gain_active:.6f}",
                         f"{x_vel_error:.6f}",
                         f"{y_vel_error:.6f}",

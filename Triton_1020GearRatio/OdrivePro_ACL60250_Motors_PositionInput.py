@@ -2,9 +2,10 @@ import threading
 import time
 
 import odrive
+from odrive import enums as odrive_enums
 
 # ------------------ CONFIGURATION ------------------
-GEAR_RATIO = 1240.0
+GEAR_RATIO = 1240.0  # Used as the pos/vel mapper scale when SPI is the load encoder.
 POSITION_TOL = 0.005
 VELOCITY_TOL = 0.001
 SPI_POSITION_TOL_DEG = 0.05
@@ -16,8 +17,8 @@ TRACKING_MAX_DEGREE = 91
 TRACKING_MIN_DEGREE = -91
 SPI_SAFETY_POLL_INTERVAL_SEC = 0.02
 
-X_SPI_HOME_RAW = 0.371575 #0.376205 #0.367891 #0.4863780736923218
-Y_SPI_HOME_RAW = 0.268500 #0.176057 #0.173497 #0.4863780736923218
+X_SPI_HOME_RAW = 0.382290 #0.371575 #0.376205 #0.367891 #0.4863780736923218
+Y_SPI_HOME_RAW = 0.037831 #0.176057 #0.173497 #0.4863780736923218
 GO_TO_HOME_ON_STARTUP = True
 
 DEFAULT_POS_GAIN = 50.0
@@ -30,6 +31,7 @@ DEFAULT_TRAJ_DECEL_LIMIT = 100.0
 
 DEFAULT_SPINOUT_MECHANICAL_POWER_THRESHOLD = -10.0
 DEFAULT_SPINOUT_ELECTRICAL_POWER_THRESHOLD = 10.0
+SPI_LOAD_ENCODER_ID = odrive_enums.ENCODER_ID_SPI_ENCODER0
 
 AXIS_CONFIG = {
     "x": {
@@ -265,6 +267,28 @@ def _ensure_spi_safety_monitor_running():
     _safety_monitor_thread.start()
 
 
+def _configure_axis_runtime_encoder_setup(odrive_instance):
+    axis0 = odrive_instance.axis0
+
+    # Keep hall commutation as-is, but switch the axis/load estimator to the SPI encoder.
+    if int(axis0.config.load_encoder) != SPI_LOAD_ENCODER_ID:
+        axis0.config.load_encoder = SPI_LOAD_ENCODER_ID
+
+    axis0.controller.config.use_commutation_vel = False
+    axis0.controller.config.use_load_encoder_for_commutation_vel = False
+
+    # Preserve the existing "motor-equivalent turns" control units even though the
+    # underlying position/velocity estimate now comes from the SPI load encoder.
+    axis0.pos_vel_mapper.config.scale = GEAR_RATIO
+    axis0.pos_vel_mapper.config.use_index_gpio = False
+    axis0.pos_vel_mapper.config.index_offset = 0.0
+    axis0.pos_vel_mapper.config.index_offset_valid = False
+    axis0.pos_vel_mapper.config.offset = 0.0
+    axis0.pos_vel_mapper.config.offset_valid = False
+    axis0.pos_vel_mapper.config.approx_init_pos = 0.0
+    axis0.pos_vel_mapper.config.approx_init_pos_valid = False
+
+
 def initialize(odrive_instance, axis="x"):
     _validate_axis(axis)
 
@@ -278,6 +302,7 @@ def initialize(odrive_instance, axis="x"):
     state["odrive"] = odrive_instance
 
     odrive_instance.clear_errors()
+    _configure_axis_runtime_encoder_setup(odrive_instance)
     odrive_instance.axis0.controller.config.pos_gain = DEFAULT_POS_GAIN
     odrive_instance.axis0.controller.config.vel_gain = DEFAULT_VEL_GAIN
     odrive_instance.axis0.controller.config.vel_integrator_gain = DEFAULT_VEL_INTEGRATOR_GAIN
@@ -684,7 +709,7 @@ if __name__ == "__main__":
                 continue
 
             move_absolute(target_output_deg, axis="x")
-            print(f"X motor-based output: {get_current_position('x'):.3f} deg")
+            print(f"X ODrive output estimate: {get_current_position('x'):.3f} deg")
             print(f"X SPI output:         {get_spi_position('x'):.3f} deg")
             print(f"X raw:                {get_spi_raw('x')}")
 
