@@ -343,6 +343,14 @@ def get_tracking_gains():
     )
 
 
+def get_tracking_gains_y():
+    return (
+        float(pos_gain_entry_small_y.get()),
+        float(vel_gain_entry_small_y.get()),
+        float(vel_i_entry_small_y.get()),
+    )
+
+
 def apply_traj():
     try:
         vel = float(traj_vel_entry.get())
@@ -372,6 +380,7 @@ def open_satellite_tracking():
         observer_lon=-112.093,
         preposition_gains=get_preposition_gains(),
         tracking_gains=get_tracking_gains(),
+        tracking_gains_y=get_tracking_gains_y(),
     )
 
 

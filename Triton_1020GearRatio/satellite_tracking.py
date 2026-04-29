@@ -54,8 +54,8 @@ TRACK_SPI_DERIVATIVE_MAX_CORRECTION_X = 0.5
 TRACK_SPI_DERIVATIVE_MAX_CORRECTION_Y = 0.15
 TRACK_VELOCITY_POSITION_GAIN_X = 10.0
 TRACK_VELOCITY_POSITION_GAIN_Y = 10.0
-TRACK_X_POSITION_GAIN_VEL_LOW_DEG_S = 0.2
-TRACK_X_POSITION_GAIN_VEL_HIGH_DEG_S = 2.0
+TRACK_X_POSITION_GAIN_VEL_LOW_DEG_S = 2.0
+TRACK_X_POSITION_GAIN_VEL_HIGH_DEG_S = 3.0
 TRACK_X_POSITION_GAIN_SCALE_LOW = 1.0
 TRACK_X_POSITION_GAIN_SCALE_HIGH = 0.5
 TRACK_Y_POSITION_GAIN_VEL_LOW_DEG_S = 0.2
@@ -88,12 +88,12 @@ TRACK_SPI_VELOCITY_FILTER_ALPHA_Y = 0.0
 TRACK_VELOCITY_COMMAND_MAX_X = 100.0
 TRACK_VELOCITY_COMMAND_MAX_Y = 100.0
 TRACK_VELOCITY_RAMP_RATE_DEG_S2 = 5.0
-TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X = 0.2
-TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y = 0.2
+TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X = 0.0
+TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y = 0.0
 TRACK_VELOCITY_CONTROLLER_MODE = "full"
 TRACK_VELOCITY_DEBUG_SCALE = 1.0
-TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW = 0.4
-TRACK_X_MOTOR_VEL_GAIN_TOWARD_MID = 0.8
+TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW = 0.3
+TRACK_X_MOTOR_VEL_GAIN_TOWARD_MID = 1.0
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_HIGH = 1.5
 TRACK_X_MOTOR_VEL_GAIN_AWAY_LOW = 0.1
 TRACK_X_MOTOR_VEL_GAIN_AWAY_MID = 0.3
@@ -103,9 +103,9 @@ TRACK_X_MOTOR_VEL_GAIN_TOWARD_ANGLE_HIGH = 85.0
 TRACK_X_MOTOR_VEL_GAIN_AWAY_ANGLE_LOW = 55.0
 TRACK_X_MOTOR_VEL_GAIN_AWAY_ANGLE_HIGH = 85.0
 TRACK_X_MOTOR_VEL_GAIN_RAMP_IN_SEC = 4.0
-TRACK_X_VEL_FF_ATTENUATE_START_DEG = 85.0
-TRACK_X_VEL_FF_ATTENUATE_STOP_DEG = 89.5
-TRACK_X_VEL_FF_ATTENUATE_SCALE = 0.0
+TRACK_X_VEL_FF_ATTENUATE_START_DEG = 1.0
+TRACK_X_VEL_FF_ATTENUATE_STOP_DEG = 10.0
+TRACK_X_VEL_FF_ATTENUATE_SCALE = 1.0
 TRACK_Y_MOTOR_VEL_GAIN_TOWARD_LOW = 1.0
 TRACK_Y_MOTOR_VEL_GAIN_TOWARD_MID = 1.0
 TRACK_Y_MOTOR_VEL_GAIN_TOWARD_HIGH = 1.0
@@ -119,7 +119,7 @@ TRACK_Y_MOTOR_VEL_GAIN_AWAY_ANGLE_HIGH = 85.0
 TRACK_Y_MOTOR_VEL_GAIN_RAMP_IN_SEC = 4.0
 TRACK_Y_VEL_FF_ATTENUATE_START_DEG = 100.0
 TRACK_Y_VEL_FF_ATTENUATE_STOP_DEG = 101.0
-TRACK_Y_VEL_FF_ATTENUATE_SCALE = 0.0
+TRACK_Y_VEL_FF_ATTENUATE_SCALE = 1.0
 
 ENCODER_ID_NAMES = {
     value: name
@@ -247,13 +247,13 @@ def attenuate_x_velocity_feedforward(
 ):
     abs_x_angle_deg = abs(x_angle_deg)
     if abs_x_angle_deg <= attenuate_start_deg:
-        return x_vel_ff_deg_s
-    if abs_x_angle_deg >= attenuate_stop_deg:
         return attenuate_scale * x_vel_ff_deg_s
+    if abs_x_angle_deg >= attenuate_stop_deg:
+        return x_vel_ff_deg_s
 
     span_deg = attenuate_stop_deg - attenuate_start_deg
     alpha = (abs_x_angle_deg - attenuate_start_deg) / span_deg
-    weight = blend_value(1.0, attenuate_scale, alpha)
+    weight = blend_value(attenuate_scale, 1.0, alpha)
     return weight * x_vel_ff_deg_s
 
 
@@ -797,6 +797,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         observer_lon=-112.09,
         preposition_gains=None,
         tracking_gains=None,
+        tracking_gains_y=None,
     ):
         super().__init__(parent)
 
@@ -807,6 +808,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.control = control
         self.preposition_gains = preposition_gains
         self.tracking_gains = tracking_gains
+        self.tracking_gains_y = tracking_gains_y or tracking_gains
 
         self.observer_lat = observer_lat
         self.observer_lon = observer_lon
@@ -865,7 +867,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_vel_ff_attenuate_scale = TRACK_Y_VEL_FF_ATTENUATE_SCALE
         self.velocity_controller_mode = TRACK_VELOCITY_CONTROLLER_MODE
         self.velocity_debug_scale = TRACK_VELOCITY_DEBUG_SCALE
-        y_motor_vel_gain_default = self.tracking_gains[1] if self.tracking_gains else TRACK_Y_MOTOR_VEL_GAIN_TOWARD_MID
+        y_motor_vel_gain_default = (
+            self.tracking_gains_y[1] if self.tracking_gains_y else TRACK_Y_MOTOR_VEL_GAIN_TOWARD_MID
+        )
         self.x_motor_vel_gain_toward_low = TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW
         self.x_motor_vel_gain_toward_mid = TRACK_X_MOTOR_VEL_GAIN_TOWARD_MID
         self.x_motor_vel_gain_toward_high = TRACK_X_MOTOR_VEL_GAIN_TOWARD_HIGH
@@ -1148,8 +1152,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Kp Pos X", "velocity_position_gain_x"),
                     ("Kp X Vel Low", "x_position_gain_vel_low_deg_s"),
                     ("Kp X Vel High", "x_position_gain_vel_high_deg_s"),
-                    ("Kp X Scale Low", "x_position_gain_scale_low"),
-                    ("Kp X Scale High", "x_position_gain_scale_high"),
+                    ("Kp X Scale at Low Vel", "x_position_gain_scale_low"),
+                    ("Kp X Scale at High Vel", "x_position_gain_scale_high"),
                     ("Ki X", "velocity_integral_gain_x"),
                     ("Kd/Vel X", "velocity_error_gain_x"),
                     ("X Damp Low", "x_damping_gain_low"),
@@ -1163,9 +1167,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Vel Max X", "velocity_command_max_x"),
                     ("Cmd Vel Alpha X", "command_velocity_filter_alpha_x"),
                     ("FF Scale X", "velocity_feedforward_scale_x"),
-                    ("X FF Atten Start", "x_vel_ff_attenuate_start_deg"),
-                    ("X FF Atten Stop", "x_vel_ff_attenuate_stop_deg"),
-                    ("X FF Atten Scale", "x_vel_ff_attenuate_scale"),
+                    ("X FF Zero Start", "x_vel_ff_attenuate_start_deg"),
+                    ("X FF Zero Stop", "x_vel_ff_attenuate_stop_deg"),
+                    ("X FF Zero Scale", "x_vel_ff_attenuate_scale"),
                     ("X Toward Gain Low", "x_motor_vel_gain_toward_low"),
                     ("X Toward Gain Mid", "x_motor_vel_gain_toward_mid"),
                     ("X Toward Gain High", "x_motor_vel_gain_toward_high"),
@@ -1185,8 +1189,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Kp Pos Y", "velocity_position_gain_y"),
                     ("Kp Y Vel Low", "y_position_gain_vel_low_deg_s"),
                     ("Kp Y Vel High", "y_position_gain_vel_high_deg_s"),
-                    ("Kp Y Scale Low", "y_position_gain_scale_low"),
-                    ("Kp Y Scale High", "y_position_gain_scale_high"),
+                    ("Kp Y Scale at Low Vel", "y_position_gain_scale_low"),
+                    ("Kp Y Scale at High Vel", "y_position_gain_scale_high"),
                     ("Ki Y", "velocity_integral_gain_y"),
                     ("Kd/Vel Y", "velocity_error_gain_y"),
                     ("Y Damp Low", "y_damping_gain_low"),
@@ -1200,9 +1204,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Vel Max Y", "velocity_command_max_y"),
                     ("Cmd Vel Alpha Y", "command_velocity_filter_alpha_y"),
                     ("FF Scale Y", "velocity_feedforward_scale_y"),
-                    ("Y FF Atten Start", "y_vel_ff_attenuate_start_deg"),
-                    ("Y FF Atten Stop", "y_vel_ff_attenuate_stop_deg"),
-                    ("Y FF Atten Scale", "y_vel_ff_attenuate_scale"),
+                    ("Y FF Zero Start", "y_vel_ff_attenuate_start_deg"),
+                    ("Y FF Zero Stop", "y_vel_ff_attenuate_stop_deg"),
+                    ("Y FF Zero Scale", "y_vel_ff_attenuate_scale"),
                     ("Y Toward Gain Low", "y_motor_vel_gain_toward_low"),
                     ("Y Toward Gain Mid", "y_motor_vel_gain_toward_mid"),
                     ("Y Toward Gain High", "y_motor_vel_gain_toward_high"),
@@ -2247,8 +2251,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     y_gain_angle_low,
                     y_gain_angle_high,
                 )
-                if self.tracking_gains:
-                    y_motor_vel_gain_base = self.tracking_gains[1]
+                if self.tracking_gains_y:
+                    y_motor_vel_gain_base = self.tracking_gains_y[1]
                     if last_applied_y_motor_vel_gain is None:
                         y_motor_vel_gain_active = y_motor_vel_gain_base
                     elif self.y_motor_vel_gain_ramp_in_sec > 0.0:
@@ -2790,19 +2794,26 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         if should_track_now:
                             if enter_tracking_now and self.tracking_gains:
                                 try:
-                                    self.control.set_gains_all(*self.tracking_gains)
                                     self.control.set_gains(
                                         self.tracking_gains[0],
                                         x_motor_vel_gain_active,
                                         self.tracking_gains[2],
                                         axis="x",
                                     )
-                                    self.control.set_gains(
-                                        self.tracking_gains[0],
-                                        y_motor_vel_gain_active,
-                                        self.tracking_gains[2],
-                                        axis="y",
-                                    )
+                                    if self.tracking_gains_y:
+                                        self.control.set_gains(
+                                            self.tracking_gains_y[0],
+                                            y_motor_vel_gain_active,
+                                            self.tracking_gains_y[2],
+                                            axis="y",
+                                        )
+                                    else:
+                                        self.control.set_gains(
+                                            self.tracking_gains[0],
+                                            y_motor_vel_gain_active,
+                                            self.tracking_gains[2],
+                                            axis="y",
+                                        )
                                     last_applied_x_motor_vel_gain = x_motor_vel_gain_active
                                     last_applied_y_motor_vel_gain = y_motor_vel_gain_active
                                 except Exception:
@@ -2829,7 +2840,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 should_track_now
                                 and not enter_tracking_now
                                 and use_velocity_tracking_mode
-                                and self.tracking_gains
+                                and self.tracking_gains_y
                                 and (
                                     last_applied_y_motor_vel_gain is None
                                     or abs(y_motor_vel_gain_active - last_applied_y_motor_vel_gain) > 1e-9
@@ -2837,9 +2848,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             ):
                                 try:
                                     self.control.set_gains(
-                                        self.tracking_gains[0],
+                                        self.tracking_gains_y[0],
                                         y_motor_vel_gain_active,
-                                        self.tracking_gains[2],
+                                        self.tracking_gains_y[2],
                                         axis="y",
                                     )
                                     last_applied_y_motor_vel_gain = y_motor_vel_gain_active
