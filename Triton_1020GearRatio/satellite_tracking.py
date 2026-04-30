@@ -66,6 +66,10 @@ TRACK_VELOCITY_INTEGRAL_GAIN_X = 0.0
 TRACK_VELOCITY_INTEGRAL_GAIN_Y = 0.0
 TRACK_VELOCITY_INTEGRAL_MAX_STATE_X = 10.0
 TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y = 10.0
+TRACK_VELOCITY_POSITION_DERIVATIVE_GAIN_X = 0.0
+TRACK_VELOCITY_POSITION_DERIVATIVE_GAIN_Y = 0.0
+TRACK_VELOCITY_POSITION_DERIVATIVE_FILTER_ALPHA_X = 0.0
+TRACK_VELOCITY_POSITION_DERIVATIVE_FILTER_ALPHA_Y = 0.0
 TRACK_VELOCITY_ERROR_GAIN_X = 0.0
 TRACK_VELOCITY_ERROR_GAIN_Y = 0.0
 TRACK_X_DAMPING_GAIN_LOW = 1.0
@@ -90,6 +94,14 @@ TRACK_VELOCITY_COMMAND_MAX_Y = 100.0
 TRACK_VELOCITY_RAMP_RATE_DEG_S2 = 5.0
 TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X = 0.0
 TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y = 0.0
+TRACK_VELOCITY_CORRECTION_SLEW_RATE_X = 10.0
+TRACK_VELOCITY_CORRECTION_SLEW_RATE_Y = 0.0
+TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_RATE = 4.0
+TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_START_DEG = 3.0
+TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_STOP_DEG = 10.0
+TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_RATE = 0.0
+TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_START_DEG = 0.0
+TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_STOP_DEG = 10.0
 TRACK_VELOCITY_CONTROLLER_MODE = "full"
 TRACK_VELOCITY_DEBUG_SCALE = 1.0
 TRACK_X_MOTOR_VEL_GAIN_TOWARD_LOW = 0.3
@@ -275,6 +287,21 @@ def scheduled_velocity_scale(abs_velocity_deg_s, low_scale, high_scale, low_velo
     span_deg_s = high_velocity_deg_s - low_velocity_deg_s
     alpha = (abs_velocity_deg_s - low_velocity_deg_s) / span_deg_s
     return blend_value(low_scale, high_scale, alpha)
+
+
+def scheduled_zero_slew_rate(axis_angle_deg, far_slew_rate, zero_slew_rate, zero_start_deg, zero_stop_deg):
+    if far_slew_rate <= 0.0:
+        return 0.0
+
+    abs_axis_angle_deg = abs(axis_angle_deg)
+    if abs_axis_angle_deg <= zero_start_deg:
+        return zero_slew_rate
+    if abs_axis_angle_deg >= zero_stop_deg:
+        return far_slew_rate
+
+    span_deg = zero_stop_deg - zero_start_deg
+    alpha = (abs_axis_angle_deg - zero_start_deg) / span_deg
+    return blend_value(zero_slew_rate, far_slew_rate, alpha)
 
 
 def quantize_spi_position_deg(position_deg, skip_bits):
@@ -834,6 +861,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_position_gain_scale_high = TRACK_Y_POSITION_GAIN_SCALE_HIGH
         self.velocity_integral_gain_x = TRACK_VELOCITY_INTEGRAL_GAIN_X
         self.velocity_integral_gain_y = TRACK_VELOCITY_INTEGRAL_GAIN_Y
+        self.velocity_position_derivative_gain_x = TRACK_VELOCITY_POSITION_DERIVATIVE_GAIN_X
+        self.velocity_position_derivative_gain_y = TRACK_VELOCITY_POSITION_DERIVATIVE_GAIN_Y
+        self.velocity_position_derivative_filter_alpha_x = TRACK_VELOCITY_POSITION_DERIVATIVE_FILTER_ALPHA_X
+        self.velocity_position_derivative_filter_alpha_y = TRACK_VELOCITY_POSITION_DERIVATIVE_FILTER_ALPHA_Y
         self.velocity_error_gain_x = TRACK_VELOCITY_ERROR_GAIN_X
         self.velocity_error_gain_y = TRACK_VELOCITY_ERROR_GAIN_Y
         self.x_damping_gain_low = TRACK_X_DAMPING_GAIN_LOW
@@ -857,6 +888,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.velocity_ramp_rate_deg_s2 = TRACK_VELOCITY_RAMP_RATE_DEG_S2
         self.command_velocity_filter_alpha_x = TRACK_COMMAND_VELOCITY_FILTER_ALPHA_X
         self.command_velocity_filter_alpha_y = TRACK_COMMAND_VELOCITY_FILTER_ALPHA_Y
+        self.velocity_correction_slew_rate_x = TRACK_VELOCITY_CORRECTION_SLEW_RATE_X
+        self.velocity_correction_slew_rate_y = TRACK_VELOCITY_CORRECTION_SLEW_RATE_Y
+        self.x_velocity_correction_slew_zero_rate = TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_RATE
+        self.x_velocity_correction_slew_zero_start_deg = TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_START_DEG
+        self.x_velocity_correction_slew_zero_stop_deg = TRACK_X_VELOCITY_CORRECTION_SLEW_ZERO_STOP_DEG
+        self.y_velocity_correction_slew_zero_rate = TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_RATE
+        self.y_velocity_correction_slew_zero_start_deg = TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_START_DEG
+        self.y_velocity_correction_slew_zero_stop_deg = TRACK_Y_VELOCITY_CORRECTION_SLEW_ZERO_STOP_DEG
         self.velocity_feedforward_scale_x = TRACK_VEL_FEEDFORWARD_SCALE_X
         self.velocity_feedforward_scale_y = TRACK_VEL_FEEDFORWARD_SCALE_Y
         self.x_vel_ff_attenuate_start_deg = TRACK_X_VEL_FF_ATTENUATE_START_DEG
@@ -1155,6 +1194,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Kp X Scale at Low Vel", "x_position_gain_scale_low"),
                     ("Kp X Scale at High Vel", "x_position_gain_scale_high"),
                     ("Ki X", "velocity_integral_gain_x"),
+                    ("Kd Pos X", "velocity_position_derivative_gain_x"),
+                    ("Kd Pos Alpha X", "velocity_position_derivative_filter_alpha_x"),
                     ("Kd/Vel X", "velocity_error_gain_x"),
                     ("X Damp Low", "x_damping_gain_low"),
                     ("X Damp Mid", "x_damping_gain_mid"),
@@ -1166,6 +1207,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Vel Alpha X", "spi_velocity_filter_alpha_x"),
                     ("Vel Max X", "velocity_command_max_x"),
                     ("Cmd Vel Alpha X", "command_velocity_filter_alpha_x"),
+                    ("Correction Slew X", "velocity_correction_slew_rate_x"),
+                    ("Corr Slew Zero X", "x_velocity_correction_slew_zero_rate"),
+                    ("Corr Slew Zero Start X", "x_velocity_correction_slew_zero_start_deg"),
+                    ("Corr Slew Zero Stop X", "x_velocity_correction_slew_zero_stop_deg"),
                     ("FF Scale X", "velocity_feedforward_scale_x"),
                     ("X FF Zero Start", "x_vel_ff_attenuate_start_deg"),
                     ("X FF Zero Stop", "x_vel_ff_attenuate_stop_deg"),
@@ -1192,6 +1237,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Kp Y Scale at Low Vel", "y_position_gain_scale_low"),
                     ("Kp Y Scale at High Vel", "y_position_gain_scale_high"),
                     ("Ki Y", "velocity_integral_gain_y"),
+                    ("Kd Pos Y", "velocity_position_derivative_gain_y"),
+                    ("Kd Pos Alpha Y", "velocity_position_derivative_filter_alpha_y"),
                     ("Kd/Vel Y", "velocity_error_gain_y"),
                     ("Y Damp Low", "y_damping_gain_low"),
                     ("Y Damp Mid", "y_damping_gain_mid"),
@@ -1203,6 +1250,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Vel Alpha Y", "spi_velocity_filter_alpha_y"),
                     ("Vel Max Y", "velocity_command_max_y"),
                     ("Cmd Vel Alpha Y", "command_velocity_filter_alpha_y"),
+                    ("Correction Slew Y", "velocity_correction_slew_rate_y"),
+                    ("Corr Slew Zero Y", "y_velocity_correction_slew_zero_rate"),
+                    ("Corr Slew Zero Start Y", "y_velocity_correction_slew_zero_start_deg"),
+                    ("Corr Slew Zero Stop Y", "y_velocity_correction_slew_zero_stop_deg"),
                     ("FF Scale Y", "velocity_feedforward_scale_y"),
                     ("Y FF Zero Start", "y_vel_ff_attenuate_start_deg"),
                     ("Y FF Zero Stop", "y_vel_ff_attenuate_stop_deg"),
@@ -1310,6 +1361,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "command_velocity_filter_alpha_y",
                 "spi_position_filter_alpha_x",
                 "spi_position_filter_alpha_y",
+                "velocity_position_derivative_filter_alpha_x",
+                "velocity_position_derivative_filter_alpha_y",
             ):
                 if not (0.0 <= values[attr_name] < 1.0):
                     raise ValueError
@@ -1320,6 +1373,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 if values[f"{prefix}_position_gain_vel_low_deg_s"] >= values[f"{prefix}_position_gain_vel_high_deg_s"]:
                     raise ValueError
                 if values[f"{prefix}_vel_ff_attenuate_start_deg"] >= values[f"{prefix}_vel_ff_attenuate_stop_deg"]:
+                    raise ValueError
+                if (
+                    values[f"{prefix}_velocity_correction_slew_zero_start_deg"]
+                    >= values[f"{prefix}_velocity_correction_slew_zero_stop_deg"]
+                ):
                     raise ValueError
                 if values[f"{prefix}_damping_angle_low"] >= values[f"{prefix}_damping_angle_high"]:
                     raise ValueError
@@ -1332,6 +1390,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     f"{prefix}_position_gain_vel_high_deg_s",
                     f"{prefix}_position_gain_scale_low",
                     f"{prefix}_position_gain_scale_high",
+                    f"velocity_correction_slew_rate_{prefix}",
+                    f"{prefix}_velocity_correction_slew_zero_rate",
+                    f"{prefix}_velocity_correction_slew_zero_start_deg",
+                    f"{prefix}_velocity_correction_slew_zero_stop_deg",
                     f"{prefix}_damping_gain_low",
                     f"{prefix}_damping_gain_mid",
                     f"{prefix}_damping_gain_high",
@@ -1754,6 +1816,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "cmd_y_i_term_deg",
                 "cmd_x_d_term_deg",
                 "cmd_y_d_term_deg",
+                "x_pos_error_derivative_deg_per_s",
+                "y_pos_error_derivative_deg_per_s",
+                "x_pos_d_term_deg_per_s",
+                "y_pos_d_term_deg_per_s",
                 "y_integral_unwind_applied",
                 "y_integral_state",
                 "cmd_x_correction_deg",
@@ -1784,6 +1850,50 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_vel_ff_attenuate_scale",
                 "x_vel_ref_now_deg_per_s",
                 "y_vel_ref_now_deg_per_s",
+                "velocity_controller_mode",
+                "x_velocity_p_term_used_deg_per_s",
+                "y_velocity_p_term_used_deg_per_s",
+                "x_velocity_i_term_used_deg_per_s",
+                "y_velocity_i_term_used_deg_per_s",
+                "x_velocity_i_state_deg_s",
+                "y_velocity_i_state_deg_s",
+                "x_velocity_pos_d_term_used_deg_per_s",
+                "y_velocity_pos_d_term_used_deg_per_s",
+                "x_velocity_vel_d_term_used_deg_per_s",
+                "y_velocity_vel_d_term_used_deg_per_s",
+                "x_velocity_feedback_sum_raw_deg_per_s",
+                "y_velocity_feedback_sum_raw_deg_per_s",
+                "x_velocity_feedback_sum_slewed_deg_per_s",
+                "y_velocity_feedback_sum_slewed_deg_per_s",
+                "x_velocity_feedback_slew_delta_deg_per_s",
+                "y_velocity_feedback_slew_delta_deg_per_s",
+                "x_velocity_feedback_slew_rate_limit_deg_per_s2",
+                "y_velocity_feedback_slew_rate_limit_deg_per_s2",
+                "x_velocity_feedback_slew_far_rate_deg_per_s2",
+                "y_velocity_feedback_slew_far_rate_deg_per_s2",
+                "x_velocity_feedback_slew_zero_rate_deg_per_s2",
+                "y_velocity_feedback_slew_zero_rate_deg_per_s2",
+                "x_velocity_feedback_slew_zero_start_deg",
+                "y_velocity_feedback_slew_zero_start_deg",
+                "x_velocity_feedback_slew_zero_stop_deg",
+                "y_velocity_feedback_slew_zero_stop_deg",
+                "x_velocity_cmd_sum_before_debug_deg_per_s",
+                "y_velocity_cmd_sum_before_debug_deg_per_s",
+                "x_velocity_cmd_after_debug_before_filter_deg_per_s",
+                "y_velocity_cmd_after_debug_before_filter_deg_per_s",
+                "x_velocity_cmd_after_filter_before_limit_deg_per_s",
+                "y_velocity_cmd_after_filter_before_limit_deg_per_s",
+                "x_velocity_integral_gain",
+                "y_velocity_integral_gain",
+                "x_velocity_position_derivative_gain",
+                "y_velocity_position_derivative_gain",
+                "x_velocity_position_derivative_filter_alpha",
+                "y_velocity_position_derivative_filter_alpha",
+                "x_velocity_error_gain",
+                "y_velocity_error_gain",
+                "x_command_velocity_filter_alpha",
+                "y_command_velocity_filter_alpha",
+                "velocity_debug_scale",
                 "cmd_x_vel_sent_deg_per_s",
                 "cmd_y_vel_sent_deg_per_s",
                 "x_actual_vel_raw_deg_per_s",
@@ -1875,6 +1985,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "cmd_y_i_term_deg",
                 "cmd_x_d_term_deg",
                 "cmd_y_d_term_deg",
+                "x_pos_error_derivative_deg_per_s",
+                "y_pos_error_derivative_deg_per_s",
+                "x_pos_d_term_deg_per_s",
+                "y_pos_d_term_deg_per_s",
                 "y_integral_unwind_applied",
                 "y_integral_state",
                 "x_vel_deg_per_s",
@@ -1893,6 +2007,50 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_vel_ff_attenuate_scale",
                 "x_vel_ref_now_deg_per_s",
                 "y_vel_ref_now_deg_per_s",
+                "velocity_controller_mode",
+                "x_velocity_p_term_used_deg_per_s",
+                "y_velocity_p_term_used_deg_per_s",
+                "x_velocity_i_term_used_deg_per_s",
+                "y_velocity_i_term_used_deg_per_s",
+                "x_velocity_i_state_deg_s",
+                "y_velocity_i_state_deg_s",
+                "x_velocity_pos_d_term_used_deg_per_s",
+                "y_velocity_pos_d_term_used_deg_per_s",
+                "x_velocity_vel_d_term_used_deg_per_s",
+                "y_velocity_vel_d_term_used_deg_per_s",
+                "x_velocity_feedback_sum_raw_deg_per_s",
+                "y_velocity_feedback_sum_raw_deg_per_s",
+                "x_velocity_feedback_sum_slewed_deg_per_s",
+                "y_velocity_feedback_sum_slewed_deg_per_s",
+                "x_velocity_feedback_slew_delta_deg_per_s",
+                "y_velocity_feedback_slew_delta_deg_per_s",
+                "x_velocity_feedback_slew_rate_limit_deg_per_s2",
+                "y_velocity_feedback_slew_rate_limit_deg_per_s2",
+                "x_velocity_feedback_slew_far_rate_deg_per_s2",
+                "y_velocity_feedback_slew_far_rate_deg_per_s2",
+                "x_velocity_feedback_slew_zero_rate_deg_per_s2",
+                "y_velocity_feedback_slew_zero_rate_deg_per_s2",
+                "x_velocity_feedback_slew_zero_start_deg",
+                "y_velocity_feedback_slew_zero_start_deg",
+                "x_velocity_feedback_slew_zero_stop_deg",
+                "y_velocity_feedback_slew_zero_stop_deg",
+                "x_velocity_cmd_sum_before_debug_deg_per_s",
+                "y_velocity_cmd_sum_before_debug_deg_per_s",
+                "x_velocity_cmd_after_debug_before_filter_deg_per_s",
+                "y_velocity_cmd_after_debug_before_filter_deg_per_s",
+                "x_velocity_cmd_after_filter_before_limit_deg_per_s",
+                "y_velocity_cmd_after_filter_before_limit_deg_per_s",
+                "x_velocity_integral_gain",
+                "y_velocity_integral_gain",
+                "x_velocity_position_derivative_gain",
+                "y_velocity_position_derivative_gain",
+                "x_velocity_position_derivative_filter_alpha",
+                "y_velocity_position_derivative_filter_alpha",
+                "x_velocity_error_gain",
+                "y_velocity_error_gain",
+                "x_command_velocity_filter_alpha",
+                "y_command_velocity_filter_alpha",
+                "velocity_debug_scale",
                 "cmd_x_vel_sent_deg_per_s",
                 "cmd_y_vel_sent_deg_per_s",
                 "x_actual_vel_raw_deg_per_s",
@@ -1954,6 +2112,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         prev_y_traj_error_for_d = None
         x_error_derivative_filtered = 0.0
         y_error_derivative_filtered = 0.0
+        x_velocity_position_error_derivative_filtered = 0.0
+        y_velocity_position_error_derivative_filtered = 0.0
         prev_x_actual_for_vel = None
         prev_y_actual_for_vel = None
         prev_x_actual_elapsed_sec = None
@@ -1966,6 +2126,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         y_position_filtered = None
         x_command_vel_filtered = None
         y_command_vel_filtered = None
+        x_velocity_feedback_slewed = None
+        y_velocity_feedback_slewed = None
         x_motor_vel_gain_active = self.x_motor_vel_gain_toward_mid
         y_motor_vel_gain_active = self.y_motor_vel_gain_toward_mid
         x_position_gain_active = self.velocity_position_gain_x
@@ -1985,12 +2147,14 @@ class SatelliteTrackingWindow(tk.Toplevel):
             nonlocal x_velocity_error_integral, y_velocity_error_integral
             nonlocal prev_x_traj_error_for_d, prev_y_traj_error_for_d
             nonlocal x_error_derivative_filtered, y_error_derivative_filtered
+            nonlocal x_velocity_position_error_derivative_filtered, y_velocity_position_error_derivative_filtered
             nonlocal prev_x_actual_for_vel, prev_y_actual_for_vel
             nonlocal prev_x_actual_elapsed_sec, prev_y_actual_elapsed_sec
             nonlocal x_actual_vel_raw, y_actual_vel_raw
             nonlocal x_actual_vel_filtered, y_actual_vel_filtered
             nonlocal x_position_filtered, y_position_filtered
             nonlocal x_command_vel_filtered, y_command_vel_filtered
+            nonlocal x_velocity_feedback_slewed, y_velocity_feedback_slewed
             nonlocal last_applied_x_motor_vel_gain, last_applied_y_motor_vel_gain
             if not self.control:
                 return
@@ -2020,6 +2184,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
             prev_y_traj_error_for_d = None
             x_error_derivative_filtered = 0.0
             y_error_derivative_filtered = 0.0
+            x_velocity_position_error_derivative_filtered = 0.0
+            y_velocity_position_error_derivative_filtered = 0.0
             prev_x_actual_for_vel = None
             prev_y_actual_for_vel = None
             prev_x_actual_elapsed_sec = None
@@ -2032,6 +2198,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
             y_position_filtered = None
             x_command_vel_filtered = None
             y_command_vel_filtered = None
+            x_velocity_feedback_slewed = None
+            y_velocity_feedback_slewed = None
             last_applied_x_motor_vel_gain = None
             last_applied_y_motor_vel_gain = None
 
@@ -2282,6 +2450,34 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 cmd_y_i_term = 0.0
                 cmd_x_d_term = 0.0
                 cmd_y_d_term = 0.0
+                x_pos_error_derivative = 0.0
+                y_pos_error_derivative = 0.0
+                x_pos_d_term = 0.0
+                y_pos_d_term = 0.0
+                x_velocity_p_term_used = 0.0
+                y_velocity_p_term_used = 0.0
+                x_velocity_i_term_used = 0.0
+                y_velocity_i_term_used = 0.0
+                x_velocity_i_state = x_velocity_error_integral
+                y_velocity_i_state = y_velocity_error_integral
+                x_velocity_pos_d_term_used = 0.0
+                y_velocity_pos_d_term_used = 0.0
+                x_velocity_vel_d_term_used = 0.0
+                y_velocity_vel_d_term_used = 0.0
+                x_velocity_feedback_sum_raw = 0.0
+                y_velocity_feedback_sum_raw = 0.0
+                x_velocity_feedback_sum_slewed = 0.0
+                y_velocity_feedback_sum_slewed = 0.0
+                x_velocity_feedback_slew_delta = 0.0
+                y_velocity_feedback_slew_delta = 0.0
+                x_velocity_feedback_slew_rate_limit = 0.0
+                y_velocity_feedback_slew_rate_limit = 0.0
+                x_velocity_cmd_sum_before_debug = 0.0
+                y_velocity_cmd_sum_before_debug = 0.0
+                x_velocity_cmd_after_debug_before_filter = 0.0
+                y_velocity_cmd_after_debug_before_filter = 0.0
+                x_velocity_cmd_after_filter_before_limit = 0.0
+                y_velocity_cmd_after_filter_before_limit = 0.0
                 y_integral_unwind_applied = 0
                 cmd_x_correction = 0.0
                 cmd_y_correction = 0.0
@@ -2598,6 +2794,36 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
                 if should_track_now and x_actual is not None and y_actual is not None:
                     if use_velocity_tracking_mode:
+                        if prev_x_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                            x_velocity_position_error_derivative_filtered = 0.0
+                        else:
+                            x_pos_error_derivative_raw = (
+                                x_traj_error - prev_x_traj_error_for_d
+                            ) / observed_loop_period_sec
+                            x_velocity_position_error_derivative_filtered = (
+                                self.velocity_position_derivative_filter_alpha_x
+                                * x_velocity_position_error_derivative_filtered
+                                + (1.0 - self.velocity_position_derivative_filter_alpha_x)
+                                * x_pos_error_derivative_raw
+                            )
+                        if prev_y_traj_error_for_d is None or observed_loop_period_sec <= 1e-6:
+                            y_velocity_position_error_derivative_filtered = 0.0
+                        else:
+                            y_pos_error_derivative_raw = (
+                                y_traj_error - prev_y_traj_error_for_d
+                            ) / observed_loop_period_sec
+                            y_velocity_position_error_derivative_filtered = (
+                                self.velocity_position_derivative_filter_alpha_y
+                                * y_velocity_position_error_derivative_filtered
+                                + (1.0 - self.velocity_position_derivative_filter_alpha_y)
+                                * y_pos_error_derivative_raw
+                            )
+                        x_pos_error_derivative = x_velocity_position_error_derivative_filtered
+                        y_pos_error_derivative = y_velocity_position_error_derivative_filtered
+                        x_pos_d_term = self.velocity_position_derivative_gain_x * x_pos_error_derivative
+                        y_pos_d_term = self.velocity_position_derivative_gain_y * y_pos_error_derivative
+                        prev_x_traj_error_for_d = x_traj_error
+                        prev_y_traj_error_for_d = y_traj_error
                         x_velocity_error_integral += x_traj_error * observed_loop_period_sec
                         y_velocity_error_integral += y_traj_error * observed_loop_period_sec
                         x_velocity_error_integral = max(
@@ -2608,31 +2834,125 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             -TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y,
                             min(TRACK_VELOCITY_INTEGRAL_MAX_STATE_Y, y_velocity_error_integral),
                         )
+                        x_velocity_i_state = x_velocity_error_integral
+                        y_velocity_i_state = y_velocity_error_integral
                         x_vel_error = x_vel_ref_now - x_actual_vel
                         y_vel_error = y_vel_ref_now - y_actual_vel
                         x_vel_error_term = self.velocity_error_gain_x * x_damping_gain_active * x_vel_error
                         y_vel_error_term = self.velocity_error_gain_y * y_damping_gain_active * y_vel_error
+                        x_velocity_p_term_computed = x_position_gain_active * x_traj_error
+                        y_velocity_p_term_computed = y_position_gain_active * y_traj_error
+                        x_velocity_i_term_computed = self.velocity_integral_gain_x * x_velocity_error_integral
+                        y_velocity_i_term_computed = self.velocity_integral_gain_y * y_velocity_error_integral
+                        x_velocity_feedback_slew_rate_limit = scheduled_zero_slew_rate(
+                            cmd_x_angle,
+                            self.velocity_correction_slew_rate_x,
+                            self.x_velocity_correction_slew_zero_rate,
+                            self.x_velocity_correction_slew_zero_start_deg,
+                            self.x_velocity_correction_slew_zero_stop_deg,
+                        )
+                        y_velocity_feedback_slew_rate_limit = scheduled_zero_slew_rate(
+                            cmd_y_angle,
+                            self.velocity_correction_slew_rate_y,
+                            self.y_velocity_correction_slew_zero_rate,
+                            self.y_velocity_correction_slew_zero_start_deg,
+                            self.y_velocity_correction_slew_zero_stop_deg,
+                        )
                         if self.velocity_controller_mode == "feedforward_only":
+                            x_velocity_feedback_slewed = None
+                            y_velocity_feedback_slewed = None
                             cmd_x_vel_sent = cmd_x_vel_ff
                             cmd_y_vel_sent = cmd_y_vel_ff
                         elif self.velocity_controller_mode == "velocity_error_only":
-                            cmd_x_vel_sent = cmd_x_vel_ff + x_vel_error_term
-                            cmd_y_vel_sent = cmd_y_vel_ff + y_vel_error_term
+                            x_velocity_vel_d_term_used = x_vel_error_term
+                            y_velocity_vel_d_term_used = y_vel_error_term
+                            x_velocity_feedback_sum_raw = x_velocity_vel_d_term_used
+                            y_velocity_feedback_sum_raw = y_velocity_vel_d_term_used
+                            x_velocity_feedback_sum_slewed = x_velocity_feedback_sum_raw
+                            y_velocity_feedback_sum_slewed = y_velocity_feedback_sum_raw
+                            if x_velocity_feedback_slew_rate_limit > 0.0 and observed_loop_period_sec > 0.0:
+                                if x_velocity_feedback_slewed is None:
+                                    x_velocity_feedback_slewed = x_velocity_feedback_sum_raw
+                                else:
+                                    max_delta = x_velocity_feedback_slew_rate_limit * observed_loop_period_sec
+                                    raw_delta = x_velocity_feedback_sum_raw - x_velocity_feedback_slewed
+                                    x_velocity_feedback_slew_delta = max(-max_delta, min(max_delta, raw_delta))
+                                    x_velocity_feedback_slewed += x_velocity_feedback_slew_delta
+                                x_velocity_feedback_sum_slewed = x_velocity_feedback_slewed
+                            else:
+                                x_velocity_feedback_slewed = x_velocity_feedback_sum_raw
+                            if y_velocity_feedback_slew_rate_limit > 0.0 and observed_loop_period_sec > 0.0:
+                                if y_velocity_feedback_slewed is None:
+                                    y_velocity_feedback_slewed = y_velocity_feedback_sum_raw
+                                else:
+                                    max_delta = y_velocity_feedback_slew_rate_limit * observed_loop_period_sec
+                                    raw_delta = y_velocity_feedback_sum_raw - y_velocity_feedback_slewed
+                                    y_velocity_feedback_slew_delta = max(-max_delta, min(max_delta, raw_delta))
+                                    y_velocity_feedback_slewed += y_velocity_feedback_slew_delta
+                                y_velocity_feedback_sum_slewed = y_velocity_feedback_slewed
+                            else:
+                                y_velocity_feedback_slewed = y_velocity_feedback_sum_raw
+                            cmd_x_vel_sent = cmd_x_vel_ff + x_velocity_feedback_sum_slewed
+                            cmd_y_vel_sent = cmd_y_vel_ff + y_velocity_feedback_sum_slewed
                         else:
+                            x_velocity_p_term_used = x_velocity_p_term_computed
+                            y_velocity_p_term_used = y_velocity_p_term_computed
+                            x_velocity_i_term_used = x_velocity_i_term_computed
+                            y_velocity_i_term_used = y_velocity_i_term_computed
+                            x_velocity_pos_d_term_used = x_pos_d_term
+                            y_velocity_pos_d_term_used = y_pos_d_term
+                            x_velocity_vel_d_term_used = x_vel_error_term
+                            y_velocity_vel_d_term_used = y_vel_error_term
+                            x_velocity_feedback_sum_raw = (
+                                x_velocity_p_term_used
+                                + x_velocity_i_term_used
+                                + x_velocity_pos_d_term_used
+                                + x_velocity_vel_d_term_used
+                            )
+                            y_velocity_feedback_sum_raw = (
+                                y_velocity_p_term_used
+                                + y_velocity_i_term_used
+                                + y_velocity_pos_d_term_used
+                                + y_velocity_vel_d_term_used
+                            )
+                            x_velocity_feedback_sum_slewed = x_velocity_feedback_sum_raw
+                            y_velocity_feedback_sum_slewed = y_velocity_feedback_sum_raw
+                            if x_velocity_feedback_slew_rate_limit > 0.0 and observed_loop_period_sec > 0.0:
+                                if x_velocity_feedback_slewed is None:
+                                    x_velocity_feedback_slewed = x_velocity_feedback_sum_raw
+                                else:
+                                    max_delta = x_velocity_feedback_slew_rate_limit * observed_loop_period_sec
+                                    raw_delta = x_velocity_feedback_sum_raw - x_velocity_feedback_slewed
+                                    x_velocity_feedback_slew_delta = max(-max_delta, min(max_delta, raw_delta))
+                                    x_velocity_feedback_slewed += x_velocity_feedback_slew_delta
+                                x_velocity_feedback_sum_slewed = x_velocity_feedback_slewed
+                            else:
+                                x_velocity_feedback_slewed = x_velocity_feedback_sum_raw
+                            if y_velocity_feedback_slew_rate_limit > 0.0 and observed_loop_period_sec > 0.0:
+                                if y_velocity_feedback_slewed is None:
+                                    y_velocity_feedback_slewed = y_velocity_feedback_sum_raw
+                                else:
+                                    max_delta = y_velocity_feedback_slew_rate_limit * observed_loop_period_sec
+                                    raw_delta = y_velocity_feedback_sum_raw - y_velocity_feedback_slewed
+                                    y_velocity_feedback_slew_delta = max(-max_delta, min(max_delta, raw_delta))
+                                    y_velocity_feedback_slewed += y_velocity_feedback_slew_delta
+                                y_velocity_feedback_sum_slewed = y_velocity_feedback_slewed
+                            else:
+                                y_velocity_feedback_slewed = y_velocity_feedback_sum_raw
                             cmd_x_vel_sent = (
                                 cmd_x_vel_ff
-                                + x_position_gain_active * x_traj_error
-                                + self.velocity_integral_gain_x * x_velocity_error_integral
-                                + x_vel_error_term
+                                + x_velocity_feedback_sum_slewed
                             )
                             cmd_y_vel_sent = (
                                 cmd_y_vel_ff
-                                + y_position_gain_active * y_traj_error
-                                + self.velocity_integral_gain_y * y_velocity_error_integral
-                                + y_vel_error_term
+                                + y_velocity_feedback_sum_slewed
                             )
+                        x_velocity_cmd_sum_before_debug = cmd_x_vel_sent
+                        y_velocity_cmd_sum_before_debug = cmd_y_vel_sent
                         cmd_x_vel_sent *= self.velocity_debug_scale
                         cmd_y_vel_sent *= self.velocity_debug_scale
+                        x_velocity_cmd_after_debug_before_filter = cmd_x_vel_sent
+                        y_velocity_cmd_after_debug_before_filter = cmd_y_vel_sent
                         if x_command_vel_filtered is None or y_command_vel_filtered is None:
                             x_command_vel_filtered = cmd_x_vel_sent
                             y_command_vel_filtered = cmd_y_vel_sent
@@ -2647,6 +2967,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             )
                         cmd_x_vel_sent = x_command_vel_filtered
                         cmd_y_vel_sent = y_command_vel_filtered
+                        x_velocity_cmd_after_filter_before_limit = cmd_x_vel_sent
+                        y_velocity_cmd_after_filter_before_limit = cmd_y_vel_sent
                         cmd_x_vel_sent = max(min(cmd_x_vel_sent, self.velocity_command_max_x), -self.velocity_command_max_x)
                         cmd_y_vel_sent = max(min(cmd_y_vel_sent, self.velocity_command_max_y), -self.velocity_command_max_y)
                     else:
@@ -2726,6 +3048,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         prev_y_traj_error_for_d = None
                         x_error_derivative_filtered = 0.0
                         y_error_derivative_filtered = 0.0
+                        x_velocity_position_error_derivative_filtered = 0.0
+                        y_velocity_position_error_derivative_filtered = 0.0
                         prev_x_actual_for_vel = None
                         prev_y_actual_for_vel = None
                         prev_x_actual_elapsed_sec = None
@@ -2734,6 +3058,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         y_actual_vel_filtered = 0.0
                         x_command_vel_filtered = None
                         y_command_vel_filtered = None
+                        x_velocity_feedback_slewed = None
+                        y_velocity_feedback_slewed = None
 
                 displayed_tracking_started = int(bool(tracking_phase == "TRACKING" or enter_tracking_now))
 
@@ -2955,6 +3281,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{cmd_y_i_term:.6f}",
                         f"{cmd_x_d_term:.6f}",
                         f"{cmd_y_d_term:.6f}",
+                        f"{x_pos_error_derivative:.6f}",
+                        f"{y_pos_error_derivative:.6f}",
+                        f"{x_pos_d_term:.6f}",
+                        f"{y_pos_d_term:.6f}",
                         str(y_integral_unwind_applied),
                         f"{y_error_integral:.6f}",
                         f"{cmd_x_correction:.6f}",
@@ -2985,6 +3315,50 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{self.y_vel_ff_attenuate_scale:.6f}",
                         f"{x_vel_ref_now:.6f}",
                         f"{y_vel_ref_now:.6f}",
+                        self.velocity_controller_mode,
+                        f"{x_velocity_p_term_used:.6f}",
+                        f"{y_velocity_p_term_used:.6f}",
+                        f"{x_velocity_i_term_used:.6f}",
+                        f"{y_velocity_i_term_used:.6f}",
+                        f"{x_velocity_i_state:.6f}",
+                        f"{y_velocity_i_state:.6f}",
+                        f"{x_velocity_pos_d_term_used:.6f}",
+                        f"{y_velocity_pos_d_term_used:.6f}",
+                        f"{x_velocity_vel_d_term_used:.6f}",
+                        f"{y_velocity_vel_d_term_used:.6f}",
+                        f"{x_velocity_feedback_sum_raw:.6f}",
+                        f"{y_velocity_feedback_sum_raw:.6f}",
+                        f"{x_velocity_feedback_sum_slewed:.6f}",
+                        f"{y_velocity_feedback_sum_slewed:.6f}",
+                        f"{x_velocity_feedback_slew_delta:.6f}",
+                        f"{y_velocity_feedback_slew_delta:.6f}",
+                        f"{x_velocity_feedback_slew_rate_limit:.6f}",
+                        f"{y_velocity_feedback_slew_rate_limit:.6f}",
+                        f"{self.velocity_correction_slew_rate_x:.6f}",
+                        f"{self.velocity_correction_slew_rate_y:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_rate:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_rate:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_start_deg:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_start_deg:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_stop_deg:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_stop_deg:.6f}",
+                        f"{x_velocity_cmd_sum_before_debug:.6f}",
+                        f"{y_velocity_cmd_sum_before_debug:.6f}",
+                        f"{x_velocity_cmd_after_debug_before_filter:.6f}",
+                        f"{y_velocity_cmd_after_debug_before_filter:.6f}",
+                        f"{x_velocity_cmd_after_filter_before_limit:.6f}",
+                        f"{y_velocity_cmd_after_filter_before_limit:.6f}",
+                        f"{self.velocity_integral_gain_x:.6f}",
+                        f"{self.velocity_integral_gain_y:.6f}",
+                        f"{self.velocity_position_derivative_gain_x:.6f}",
+                        f"{self.velocity_position_derivative_gain_y:.6f}",
+                        f"{self.velocity_position_derivative_filter_alpha_x:.6f}",
+                        f"{self.velocity_position_derivative_filter_alpha_y:.6f}",
+                        f"{self.velocity_error_gain_x:.6f}",
+                        f"{self.velocity_error_gain_y:.6f}",
+                        f"{self.command_velocity_filter_alpha_x:.6f}",
+                        f"{self.command_velocity_filter_alpha_y:.6f}",
+                        f"{self.velocity_debug_scale:.6f}",
                         f"{cmd_x_vel_sent:.6f}",
                         f"{cmd_y_vel_sent:.6f}",
                         f"{x_actual_vel_raw:.6f}",
@@ -3076,6 +3450,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{cmd_y_i_term:.6f}",
                         f"{cmd_x_d_term:.6f}",
                         f"{cmd_y_d_term:.6f}",
+                        f"{x_pos_error_derivative:.6f}",
+                        f"{y_pos_error_derivative:.6f}",
+                        f"{x_pos_d_term:.6f}",
+                        f"{y_pos_d_term:.6f}",
                         str(y_integral_unwind_applied),
                         f"{y_error_integral:.6f}",
                         f"{x_vel:.6f}",
@@ -3094,6 +3472,50 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{self.y_vel_ff_attenuate_scale:.6f}",
                         f"{x_vel_ref_now:.6f}",
                         f"{y_vel_ref_now:.6f}",
+                        self.velocity_controller_mode,
+                        f"{x_velocity_p_term_used:.6f}",
+                        f"{y_velocity_p_term_used:.6f}",
+                        f"{x_velocity_i_term_used:.6f}",
+                        f"{y_velocity_i_term_used:.6f}",
+                        f"{x_velocity_i_state:.6f}",
+                        f"{y_velocity_i_state:.6f}",
+                        f"{x_velocity_pos_d_term_used:.6f}",
+                        f"{y_velocity_pos_d_term_used:.6f}",
+                        f"{x_velocity_vel_d_term_used:.6f}",
+                        f"{y_velocity_vel_d_term_used:.6f}",
+                        f"{x_velocity_feedback_sum_raw:.6f}",
+                        f"{y_velocity_feedback_sum_raw:.6f}",
+                        f"{x_velocity_feedback_sum_slewed:.6f}",
+                        f"{y_velocity_feedback_sum_slewed:.6f}",
+                        f"{x_velocity_feedback_slew_delta:.6f}",
+                        f"{y_velocity_feedback_slew_delta:.6f}",
+                        f"{x_velocity_feedback_slew_rate_limit:.6f}",
+                        f"{y_velocity_feedback_slew_rate_limit:.6f}",
+                        f"{self.velocity_correction_slew_rate_x:.6f}",
+                        f"{self.velocity_correction_slew_rate_y:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_rate:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_rate:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_start_deg:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_start_deg:.6f}",
+                        f"{self.x_velocity_correction_slew_zero_stop_deg:.6f}",
+                        f"{self.y_velocity_correction_slew_zero_stop_deg:.6f}",
+                        f"{x_velocity_cmd_sum_before_debug:.6f}",
+                        f"{y_velocity_cmd_sum_before_debug:.6f}",
+                        f"{x_velocity_cmd_after_debug_before_filter:.6f}",
+                        f"{y_velocity_cmd_after_debug_before_filter:.6f}",
+                        f"{x_velocity_cmd_after_filter_before_limit:.6f}",
+                        f"{y_velocity_cmd_after_filter_before_limit:.6f}",
+                        f"{self.velocity_integral_gain_x:.6f}",
+                        f"{self.velocity_integral_gain_y:.6f}",
+                        f"{self.velocity_position_derivative_gain_x:.6f}",
+                        f"{self.velocity_position_derivative_gain_y:.6f}",
+                        f"{self.velocity_position_derivative_filter_alpha_x:.6f}",
+                        f"{self.velocity_position_derivative_filter_alpha_y:.6f}",
+                        f"{self.velocity_error_gain_x:.6f}",
+                        f"{self.velocity_error_gain_y:.6f}",
+                        f"{self.command_velocity_filter_alpha_x:.6f}",
+                        f"{self.command_velocity_filter_alpha_y:.6f}",
+                        f"{self.velocity_debug_scale:.6f}",
                         f"{cmd_x_vel_sent:.6f}",
                         f"{cmd_y_vel_sent:.6f}",
                         f"{x_actual_vel_raw:.6f}",
