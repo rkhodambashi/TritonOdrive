@@ -89,6 +89,12 @@ TRACK_SPI_POSITION_SKIP_BITS_X = 0
 TRACK_SPI_POSITION_SKIP_BITS_Y = 0
 TRACK_SPI_VELOCITY_FILTER_ALPHA_X = 0.0
 TRACK_SPI_VELOCITY_FILTER_ALPHA_Y = 0.0
+TRACK_BENEDICT_BORDNER_ENABLE_X = 1.0
+TRACK_BENEDICT_BORDNER_ENABLE_Y = 1.0
+TRACK_BENEDICT_BORDNER_ALPHA_X = 0.35
+TRACK_BENEDICT_BORDNER_ALPHA_Y = 0.35
+TRACK_BENEDICT_BORDNER_BETA_SCALE_X = 1.0
+TRACK_BENEDICT_BORDNER_BETA_SCALE_Y = 1.0
 TRACK_VELOCITY_COMMAND_MAX_X = 100.0
 TRACK_VELOCITY_COMMAND_MAX_Y = 100.0
 TRACK_VELOCITY_RAMP_RATE_DEG_S2 = 5.0
@@ -312,6 +318,40 @@ def quantize_spi_position_deg(position_deg, skip_bits):
     effective_bits = TRACK_SPI_ENCODER_BITS - skip_bits
     step_deg = 360.0 / float(1 << effective_bits)
     return round(position_deg / step_deg) * step_deg
+
+
+def benedict_bordner_beta(alpha, beta_scale):
+    if alpha <= 0.0:
+        return 0.0
+    return beta_scale * (alpha * alpha) / (2.0 - alpha)
+
+
+class BenedictBordnerState:
+    def __init__(self):
+        self.position_deg = None
+        self.velocity_deg_s = 0.0
+        self.predicted_position_deg = None
+        self.residual_deg = 0.0
+
+    def reset(self):
+        self.position_deg = None
+        self.velocity_deg_s = 0.0
+        self.predicted_position_deg = None
+        self.residual_deg = 0.0
+
+    def update(self, measured_position_deg, dt_sec, alpha, beta):
+        if self.position_deg is None or dt_sec <= 0.0:
+            self.position_deg = measured_position_deg
+            self.velocity_deg_s = 0.0
+            self.predicted_position_deg = measured_position_deg
+            self.residual_deg = 0.0
+            return self.position_deg, self.velocity_deg_s, self.predicted_position_deg, self.residual_deg
+
+        self.predicted_position_deg = self.position_deg + self.velocity_deg_s * dt_sec
+        self.residual_deg = measured_position_deg - self.predicted_position_deg
+        self.position_deg = self.predicted_position_deg + alpha * self.residual_deg
+        self.velocity_deg_s = self.velocity_deg_s + beta * self.residual_deg / dt_sec
+        return self.position_deg, self.velocity_deg_s, self.predicted_position_deg, self.residual_deg
 
 
 def moving_toward_vertical(x_angle_deg, x_velocity_deg_s):
@@ -883,6 +923,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.spi_position_skip_bits_y = TRACK_SPI_POSITION_SKIP_BITS_Y
         self.spi_velocity_filter_alpha_x = TRACK_SPI_VELOCITY_FILTER_ALPHA_X
         self.spi_velocity_filter_alpha_y = TRACK_SPI_VELOCITY_FILTER_ALPHA_Y
+        self.benedict_bordner_enable_x = TRACK_BENEDICT_BORDNER_ENABLE_X
+        self.benedict_bordner_enable_y = TRACK_BENEDICT_BORDNER_ENABLE_Y
+        self.benedict_bordner_alpha_x = TRACK_BENEDICT_BORDNER_ALPHA_X
+        self.benedict_bordner_alpha_y = TRACK_BENEDICT_BORDNER_ALPHA_Y
+        self.benedict_bordner_beta_scale_x = TRACK_BENEDICT_BORDNER_BETA_SCALE_X
+        self.benedict_bordner_beta_scale_y = TRACK_BENEDICT_BORDNER_BETA_SCALE_Y
         self.velocity_command_max_x = TRACK_VELOCITY_COMMAND_MAX_X
         self.velocity_command_max_y = TRACK_VELOCITY_COMMAND_MAX_Y
         self.velocity_ramp_rate_deg_s2 = TRACK_VELOCITY_RAMP_RATE_DEG_S2
@@ -1205,6 +1251,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Pos Alpha X", "spi_position_filter_alpha_x"),
                     ("SPI Skip X", "spi_position_skip_bits_x"),
                     ("Vel Alpha X", "spi_velocity_filter_alpha_x"),
+                    ("BB Enable X", "benedict_bordner_enable_x"),
+                    ("BB Alpha X", "benedict_bordner_alpha_x"),
+                    ("BB Beta Scale X", "benedict_bordner_beta_scale_x"),
                     ("Vel Max X", "velocity_command_max_x"),
                     ("Cmd Vel Alpha X", "command_velocity_filter_alpha_x"),
                     ("Correction Slew X", "velocity_correction_slew_rate_x"),
@@ -1248,6 +1297,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     ("Pos Alpha Y", "spi_position_filter_alpha_y"),
                     ("SPI Skip Y", "spi_position_skip_bits_y"),
                     ("Vel Alpha Y", "spi_velocity_filter_alpha_y"),
+                    ("BB Enable Y", "benedict_bordner_enable_y"),
+                    ("BB Alpha Y", "benedict_bordner_alpha_y"),
+                    ("BB Beta Scale Y", "benedict_bordner_beta_scale_y"),
                     ("Vel Max Y", "velocity_command_max_y"),
                     ("Cmd Vel Alpha Y", "command_velocity_filter_alpha_y"),
                     ("Correction Slew Y", "velocity_correction_slew_rate_y"),
@@ -1366,6 +1418,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
             ):
                 if not (0.0 <= values[attr_name] < 1.0):
                     raise ValueError
+            for attr_name in ("benedict_bordner_enable_x", "benedict_bordner_enable_y"):
+                if values[attr_name] not in (0.0, 1.0):
+                    raise ValueError
+            for attr_name in ("benedict_bordner_alpha_x", "benedict_bordner_alpha_y"):
+                if not (0.0 < values[attr_name] < 1.0):
+                    raise ValueError
+            for attr_name in ("benedict_bordner_beta_scale_x", "benedict_bordner_beta_scale_y"):
+                if values[attr_name] < 0.0:
+                    raise ValueError
             for attr_name in ("spi_position_skip_bits_x", "spi_position_skip_bits_y"):
                 if values[attr_name] < 0 or values[attr_name] >= TRACK_SPI_ENCODER_BITS:
                     raise ValueError
@@ -1431,6 +1492,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 (
                     "Velocity settings contain an invalid value.\n"
                     "Alpha values must be in [0, 1).\n"
+                    "BB enable must be 0 or 1, BB alpha must be in (0, 1), and BB beta scale must be non-negative.\n"
                     "Skipped bits must be valid encoder bits.\n"
                     "Low thresholds must be smaller than high thresholds.\n"
                     "Motor gain values must be positive."
@@ -1900,6 +1962,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_actual_vel_raw_deg_per_s",
                 "x_actual_vel_deg_per_s",
                 "y_actual_vel_deg_per_s",
+                "x_spi_sample_deg",
+                "y_spi_sample_deg",
+                "x_benedict_bordner_enabled",
+                "y_benedict_bordner_enabled",
+                "x_benedict_bordner_alpha",
+                "y_benedict_bordner_alpha",
+                "x_benedict_bordner_beta",
+                "y_benedict_bordner_beta",
+                "x_benedict_bordner_beta_scale",
+                "y_benedict_bordner_beta_scale",
+                "x_benedict_bordner_predicted_deg",
+                "y_benedict_bordner_predicted_deg",
+                "x_benedict_bordner_residual_deg",
+                "y_benedict_bordner_residual_deg",
                 "x_position_gain_active",
                 "x_damping_gain_active",
                 "y_position_gain_active",
@@ -2057,6 +2133,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_actual_vel_raw_deg_per_s",
                 "x_actual_vel_deg_per_s",
                 "y_actual_vel_deg_per_s",
+                "x_spi_sample_deg",
+                "y_spi_sample_deg",
+                "x_benedict_bordner_enabled",
+                "y_benedict_bordner_enabled",
+                "x_benedict_bordner_alpha",
+                "y_benedict_bordner_alpha",
+                "x_benedict_bordner_beta",
+                "y_benedict_bordner_beta",
+                "x_benedict_bordner_beta_scale",
+                "y_benedict_bordner_beta_scale",
+                "x_benedict_bordner_predicted_deg",
+                "y_benedict_bordner_predicted_deg",
+                "x_benedict_bordner_residual_deg",
+                "y_benedict_bordner_residual_deg",
                 "x_position_gain_active",
                 "x_damping_gain_active",
                 "y_position_gain_active",
@@ -2124,6 +2214,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
         y_actual_vel_filtered = 0.0
         x_position_filtered = None
         y_position_filtered = None
+        x_bb_state = BenedictBordnerState()
+        y_bb_state = BenedictBordnerState()
+        x_bb_predicted = None
+        y_bb_predicted = None
+        x_bb_residual = 0.0
+        y_bb_residual = 0.0
+        x_bb_beta = benedict_bordner_beta(
+            self.benedict_bordner_alpha_x,
+            self.benedict_bordner_beta_scale_x,
+        )
+        y_bb_beta = benedict_bordner_beta(
+            self.benedict_bordner_alpha_y,
+            self.benedict_bordner_beta_scale_y,
+        )
         x_command_vel_filtered = None
         y_command_vel_filtered = None
         x_velocity_feedback_slewed = None
@@ -2153,6 +2257,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
             nonlocal x_actual_vel_raw, y_actual_vel_raw
             nonlocal x_actual_vel_filtered, y_actual_vel_filtered
             nonlocal x_position_filtered, y_position_filtered
+            nonlocal x_bb_predicted, y_bb_predicted, x_bb_residual, y_bb_residual
             nonlocal x_command_vel_filtered, y_command_vel_filtered
             nonlocal x_velocity_feedback_slewed, y_velocity_feedback_slewed
             nonlocal last_applied_x_motor_vel_gain, last_applied_y_motor_vel_gain
@@ -2196,6 +2301,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
             y_actual_vel_filtered = 0.0
             x_position_filtered = None
             y_position_filtered = None
+            x_bb_state.reset()
+            y_bb_state.reset()
+            x_bb_predicted = None
+            y_bb_predicted = None
+            x_bb_residual = 0.0
+            y_bb_residual = 0.0
             x_command_vel_filtered = None
             y_command_vel_filtered = None
             x_velocity_feedback_slewed = None
@@ -2493,6 +2604,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 y_actual = None
                 x_actual_raw = None
                 y_actual_raw = None
+                x_actual_sample = None
+                y_actual_sample = None
+                x_bb_active = False
+                y_bb_active = False
                 x_actual_vel = 0.0
                 y_actual_vel = 0.0
                 x_vel_ref_now = 0.0
@@ -2575,32 +2690,74 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         spi_x_start = time.perf_counter()
                         x_actual_raw = self.control.get_spi_position("x")
                         x_actual_sample = quantize_spi_position_deg(x_actual_raw, self.spi_position_skip_bits_x)
-                        if x_position_filtered is None or self.spi_position_filter_alpha_x <= 0.0:
-                            x_position_filtered = x_actual_sample
-                        else:
-                            x_position_filtered = (
-                                self.spi_position_filter_alpha_x * x_position_filtered
-                                + (1.0 - self.spi_position_filter_alpha_x) * x_actual_sample
-                            )
-                        x_actual = x_position_filtered
                         spi_x_done = time.perf_counter()
+                        meas_x_elapsed_sec = spi_x_done - tracking_start_perf
+                        x_bb_active = self.benedict_bordner_enable_x >= 0.5
+                        if x_bb_active:
+                            x_bb_beta = benedict_bordner_beta(
+                                self.benedict_bordner_alpha_x,
+                                self.benedict_bordner_beta_scale_x,
+                            )
+                            x_bb_dt_sec = 0.0
+                            if prev_x_actual_elapsed_sec is not None:
+                                x_bb_dt_sec = meas_x_elapsed_sec - prev_x_actual_elapsed_sec
+                            x_actual, x_actual_vel_filtered, x_bb_predicted, x_bb_residual = x_bb_state.update(
+                                x_actual_sample,
+                                x_bb_dt_sec,
+                                self.benedict_bordner_alpha_x,
+                                x_bb_beta,
+                            )
+                            x_actual_vel_raw = x_actual_vel_filtered
+                            x_position_filtered = x_actual
+                        else:
+                            x_bb_predicted = None
+                            x_bb_residual = 0.0
+                            x_bb_state.reset()
+                            if x_position_filtered is None or self.spi_position_filter_alpha_x <= 0.0:
+                                x_position_filtered = x_actual_sample
+                            else:
+                                x_position_filtered = (
+                                    self.spi_position_filter_alpha_x * x_position_filtered
+                                    + (1.0 - self.spi_position_filter_alpha_x) * x_actual_sample
+                                )
+                            x_actual = x_position_filtered
                         spi_x_read_ms = (spi_x_done - spi_x_start) * 1000.0
                         spi_y_start = time.perf_counter()
                         y_actual_raw = self.control.get_spi_position("y")
                         y_actual_sample = quantize_spi_position_deg(y_actual_raw, self.spi_position_skip_bits_y)
-                        if y_position_filtered is None or self.spi_position_filter_alpha_y <= 0.0:
-                            y_position_filtered = y_actual_sample
-                        else:
-                            y_position_filtered = (
-                                self.spi_position_filter_alpha_y * y_position_filtered
-                                + (1.0 - self.spi_position_filter_alpha_y) * y_actual_sample
-                            )
-                        y_actual = y_position_filtered
                         spi_y_done = time.perf_counter()
+                        meas_y_elapsed_sec = spi_y_done - tracking_start_perf
+                        y_bb_active = self.benedict_bordner_enable_y >= 0.5
+                        if y_bb_active:
+                            y_bb_beta = benedict_bordner_beta(
+                                self.benedict_bordner_alpha_y,
+                                self.benedict_bordner_beta_scale_y,
+                            )
+                            y_bb_dt_sec = 0.0
+                            if prev_y_actual_elapsed_sec is not None:
+                                y_bb_dt_sec = meas_y_elapsed_sec - prev_y_actual_elapsed_sec
+                            y_actual, y_actual_vel_filtered, y_bb_predicted, y_bb_residual = y_bb_state.update(
+                                y_actual_sample,
+                                y_bb_dt_sec,
+                                self.benedict_bordner_alpha_y,
+                                y_bb_beta,
+                            )
+                            y_actual_vel_raw = y_actual_vel_filtered
+                            y_position_filtered = y_actual
+                        else:
+                            y_bb_predicted = None
+                            y_bb_residual = 0.0
+                            y_bb_state.reset()
+                            if y_position_filtered is None or self.spi_position_filter_alpha_y <= 0.0:
+                                y_position_filtered = y_actual_sample
+                            else:
+                                y_position_filtered = (
+                                    self.spi_position_filter_alpha_y * y_position_filtered
+                                    + (1.0 - self.spi_position_filter_alpha_y) * y_actual_sample
+                                )
+                            y_actual = y_position_filtered
                         spi_y_read_ms = (spi_y_done - spi_y_start) * 1000.0
                         spi_total_ms = (spi_y_done - spi_window_start) * 1000.0
-                        meas_x_elapsed_sec = spi_x_done - tracking_start_perf
-                        meas_y_elapsed_sec = spi_y_done - tracking_start_perf
                         meas_mid_elapsed_sec = spi_y_done - tracking_start_perf
                         if last_sent_raw_command is not None:
                             meas_cmd_x_angle, meas_cmd_y_angle = last_sent_raw_command
@@ -2662,7 +2819,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             self.y_position_gain_vel_low_deg_s,
                             self.y_position_gain_vel_high_deg_s,
                         )
-                        if (
+                        if x_bb_active:
+                            x_actual_vel = x_actual_vel_filtered
+                        elif (
                             prev_x_actual_for_vel is not None
                             and prev_x_actual_elapsed_sec is not None
                             and meas_x_elapsed_sec is not None
@@ -2678,7 +2837,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         else:
                             x_actual_vel_raw = 0.0
                             x_actual_vel_filtered = 0.0
-                        if (
+                            x_actual_vel = x_actual_vel_filtered
+                        if y_bb_active:
+                            y_actual_vel = y_actual_vel_filtered
+                        elif (
                             prev_y_actual_for_vel is not None
                             and prev_y_actual_elapsed_sec is not None
                             and meas_y_elapsed_sec is not None
@@ -2694,8 +2856,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         else:
                             y_actual_vel_raw = 0.0
                             y_actual_vel_filtered = 0.0
-                        x_actual_vel = x_actual_vel_filtered
-                        y_actual_vel = y_actual_vel_filtered
+                            y_actual_vel = y_actual_vel_filtered
+                        if not x_bb_active:
+                            x_actual_vel = x_actual_vel_filtered
+                        if not y_bb_active:
+                            y_actual_vel = y_actual_vel_filtered
                         prev_x_actual_for_vel = x_actual
                         prev_y_actual_for_vel = y_actual
                         prev_x_actual_elapsed_sec = meas_x_elapsed_sec
@@ -2706,6 +2871,10 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         y_actual = None
                         x_actual_raw = None
                         y_actual_raw = None
+                        x_actual_sample = None
+                        y_actual_sample = None
+                        x_bb_active = False
+                        y_bb_active = False
 
                 track_ready = capture_error is not None and capture_error <= self.track_capture_error_deg
                 track_gate_open = sample["visible"] or pickup_window_active
@@ -3365,6 +3534,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_actual_vel_raw:.6f}",
                         f"{x_actual_vel:.6f}",
                         f"{y_actual_vel:.6f}",
+                        "" if x_actual_sample is None else f"{x_actual_sample:.6f}",
+                        "" if y_actual_sample is None else f"{y_actual_sample:.6f}",
+                        str(int(x_bb_active)),
+                        str(int(y_bb_active)),
+                        f"{self.benedict_bordner_alpha_x:.6f}",
+                        f"{self.benedict_bordner_alpha_y:.6f}",
+                        f"{x_bb_beta:.6f}",
+                        f"{y_bb_beta:.6f}",
+                        f"{self.benedict_bordner_beta_scale_x:.6f}",
+                        f"{self.benedict_bordner_beta_scale_y:.6f}",
+                        "" if x_bb_predicted is None else f"{x_bb_predicted:.6f}",
+                        "" if y_bb_predicted is None else f"{y_bb_predicted:.6f}",
+                        f"{x_bb_residual:.6f}",
+                        f"{y_bb_residual:.6f}",
                         f"{x_position_gain_active:.6f}",
                         f"{x_damping_gain_active:.6f}",
                         f"{y_position_gain_active:.6f}",
@@ -3522,6 +3705,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_actual_vel_raw:.6f}",
                         f"{x_actual_vel:.6f}",
                         f"{y_actual_vel:.6f}",
+                        "" if x_actual_sample is None else f"{x_actual_sample:.6f}",
+                        "" if y_actual_sample is None else f"{y_actual_sample:.6f}",
+                        str(int(x_bb_active)),
+                        str(int(y_bb_active)),
+                        f"{self.benedict_bordner_alpha_x:.6f}",
+                        f"{self.benedict_bordner_alpha_y:.6f}",
+                        f"{x_bb_beta:.6f}",
+                        f"{y_bb_beta:.6f}",
+                        f"{self.benedict_bordner_beta_scale_x:.6f}",
+                        f"{self.benedict_bordner_beta_scale_y:.6f}",
+                        "" if x_bb_predicted is None else f"{x_bb_predicted:.6f}",
+                        "" if y_bb_predicted is None else f"{y_bb_predicted:.6f}",
+                        f"{x_bb_residual:.6f}",
+                        f"{y_bb_residual:.6f}",
                         f"{x_position_gain_active:.6f}",
                         f"{x_damping_gain_active:.6f}",
                         f"{y_position_gain_active:.6f}",
