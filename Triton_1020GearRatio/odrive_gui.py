@@ -117,7 +117,7 @@ def update_position_loop():
 
     x_diag_var.set(
         f"Cmd: {f'{x_input_pos:.6f}' if x_input_pos is not None else '-'}   "
-        f"Motor: {f'{x_motor_raw:.6f}' if x_motor_raw is not None else '-'}   "
+        f"Est: {f'{x_motor_raw:.6f}' if x_motor_raw is not None else '-'}   "
         f"Vel: {f'{x_velocity:.6f}' if x_velocity is not None else '-'}   "
         f"Angle: {f'{x_position:.3f}' if x_position is not None else '-'}"
     )
@@ -151,7 +151,7 @@ def update_position_loop():
 
     y_diag_var.set(
         f"Cmd: {f'{y_input_pos:.6f}' if y_input_pos is not None else '-'}   "
-        f"Motor: {f'{y_motor_raw:.6f}' if y_motor_raw is not None else '-'}   "
+        f"Est: {f'{y_motor_raw:.6f}' if y_motor_raw is not None else '-'}   "
         f"Vel: {f'{y_velocity:.6f}' if y_velocity is not None else '-'}   "
         f"Angle: {f'{y_position:.3f}' if y_position is not None else '-'}"
     )
@@ -343,6 +343,14 @@ def get_tracking_gains():
     )
 
 
+def get_tracking_gains_y():
+    return (
+        float(pos_gain_entry_small_y.get()),
+        float(vel_gain_entry_small_y.get()),
+        float(vel_i_entry_small_y.get()),
+    )
+
+
 def apply_traj():
     try:
         vel = float(traj_vel_entry.get())
@@ -372,6 +380,7 @@ def open_satellite_tracking():
         observer_lon=-112.093,
         preposition_gains=get_preposition_gains(),
         tracking_gains=get_tracking_gains(),
+        tracking_gains_y=get_tracking_gains_y(),
     )
 
 
@@ -607,7 +616,7 @@ x_position_var = tk.StringVar(value="0.000 deg")
 ttk.Label(x_status_frame, textvariable=x_position_var, font=("Arial", 14)).grid(row=0, column=1, sticky="w", padx=8)
 x_fault_var = tk.StringVar(value="State: -   Disarm: -   Active: -   Proc: -")
 ttk.Label(x_status_frame, textvariable=x_fault_var).grid(row=1, column=0, columnspan=2, sticky="w")
-x_diag_var = tk.StringVar(value="Cmd: -   Motor: -   Vel: -   Angle: -")
+x_diag_var = tk.StringVar(value="Cmd: -   Est: -   Vel: -   Angle: -")
 ttk.Label(x_status_frame, textvariable=x_diag_var).grid(row=2, column=0, columnspan=2, sticky="w")
 
 y_status_frame = ttk.Frame(left_frame)
@@ -617,14 +626,14 @@ y_position_var = tk.StringVar(value="0.000 deg")
 ttk.Label(y_status_frame, textvariable=y_position_var, font=("Arial", 14)).grid(row=0, column=1, sticky="w", padx=8)
 y_fault_var = tk.StringVar(value="State: -   Disarm: -   Active: -   Proc: -")
 ttk.Label(y_status_frame, textvariable=y_fault_var).grid(row=1, column=0, columnspan=2, sticky="w")
-y_diag_var = tk.StringVar(value="Cmd: -   Motor: -   Vel: -   Angle: -")
+y_diag_var = tk.StringVar(value="Cmd: -   Est: -   Vel: -   Angle: -")
 ttk.Label(y_status_frame, textvariable=y_diag_var).grid(row=2, column=0, columnspan=2, sticky="w")
 
 raw_frame = ttk.Frame(left_frame)
 raw_frame.pack(fill="x", pady=5)
 
 ttk.Label(raw_frame, text="Axis").grid(row=0, column=0, padx=5)
-ttk.Label(raw_frame, text="Motor Encoder (turns)").grid(row=0, column=1, padx=5)
+ttk.Label(raw_frame, text="ODrive Est (turns)").grid(row=0, column=1, padx=5)
 ttk.Label(raw_frame, text="SPI Encoder (turns)").grid(row=0, column=2, padx=5)
 
 ttk.Label(raw_frame, text="X").grid(row=1, column=0)
