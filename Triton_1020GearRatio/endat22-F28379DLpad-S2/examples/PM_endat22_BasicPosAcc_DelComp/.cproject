@@ -190,7 +190,7 @@
                         </toolChain>
                     </folderInfo>
                     <sourceEntries>
-                        <entry excluding="endat.c|PM_endat22-Main.c|F2837xD_GlobalVariableDefs_clb.c|F2837xD_Clb_drivers.c|F2837xD_ClbXbar_drivers.c|source_files/clb3_config.c|source_files/clb4_config.c|source_files/clb2_config.c|source_files/clb1_config.c|source_files/clb4_config_reset_position_Oct6.c|Endat_Commands_9Sep14.c|Endat_Commands_4Sep14.c|Endat_CLB_SystemTest_new_1_4Sep14.c|Endat_CLB_SystemTest_1.c|Endat_CLB_cmds_1.c|Endat_CLB_reset_position.c|Endat_CLB_basic1.c|Endat_CLB_basic1_13Jan.c|F2837xD_Spi.c|Example_28X7xSpi_FFDLB_int.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+                        <entry excluding="F2837xD_GlobalVariableDefs_clb.c|F2837xD_Clb_drivers.c|F2837xD_ClbXbar_drivers.c|source_files/clb3_config.c|source_files/clb4_config.c|source_files/clb2_config.c|source_files/clb1_config.c|source_files/clb4_config_reset_position_Oct6.c|Endat_Commands_9Sep14.c|Endat_Commands_4Sep14.c|Endat_CLB_SystemTest_new_1_4Sep14.c|Endat_CLB_SystemTest_1.c|Endat_CLB_cmds_1.c|Endat_CLB_reset_position.c|Endat_CLB_basic1.c|Endat_CLB_basic1_13Jan.c|F2837xD_Spi.c|Example_28X7xSpi_FFDLB_int.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
                     </sourceEntries>
                 </configuration>
             </storageModule>
