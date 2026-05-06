@@ -2039,6 +2039,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "x_endat_raw_count",
                 "x_endat_abs_deg",
                 "x_endat_axis_deg",
+                "x_endat_minus_spi_deg",
                 "x_endat_age_sec",
                 "x_endat_error1",
                 "x_endat_error2",
@@ -2705,6 +2706,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 x_endat_raw_count = None
                 x_endat_abs_deg = None
                 x_endat_axis_deg = None
+                x_endat_minus_spi_deg = None
                 x_endat_age_sec = None
                 x_endat_error1 = None
                 x_endat_error2 = None
@@ -2809,6 +2811,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                     x_endat_abs_deg,
                                     self.endat_x_sign,
                                 )
+                                if x_spi_sample_for_log is not None:
+                                    x_endat_minus_spi_deg = x_endat_axis_deg - x_spi_sample_for_log
                                 x_endat_age_sec = max(0.0, time.monotonic() - x_endat_sample.timestamp_s)
                                 x_endat_error1 = x_endat_sample.error1
                                 x_endat_error2 = x_endat_sample.error2
@@ -3002,6 +3006,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         x_spi_sample_for_log = None
                         x_measurement_source = "error"
                         x_endat_sample = None
+                        x_endat_minus_spi_deg = None
                         x_bb_active = False
                         y_bb_active = False
 
@@ -3394,6 +3399,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
                                 if x_endat_axis_deg is not None and x_endat_age_sec is not None
                                 else "X EnDat: -"
                             ),
+                            (
+                                f"X EnDat-SPI: {x_endat_minus_spi_deg:.3f}"
+                                if x_endat_minus_spi_deg is not None
+                                else "X EnDat-SPI: -"
+                            ),
                             f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
                             f"X Cmd Error: {x_error:.3f}",
                             f"Y Cmd Error: {y_error:.3f}",
@@ -3675,6 +3685,7 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         "" if x_endat_raw_count is None else str(x_endat_raw_count),
                         "" if x_endat_abs_deg is None else f"{x_endat_abs_deg:.6f}",
                         "" if x_endat_axis_deg is None else f"{x_endat_axis_deg:.6f}",
+                        "" if x_endat_minus_spi_deg is None else f"{x_endat_minus_spi_deg:.6f}",
                         "" if x_endat_age_sec is None else f"{x_endat_age_sec:.6f}",
                         "" if x_endat_error1 is None else str(x_endat_error1),
                         "" if x_endat_error2 is None else str(x_endat_error2),
