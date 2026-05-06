@@ -11,3 +11,12 @@ Triton_1020GearRatio/TLE/
 Triton_1020GearRatio/gui_code_variable_map.pdf
 Triton_1020GearRatio/gui_code_variable_map.xlsx
 Triton_1020GearRatio/Control Law.docx
+
+# TI C2000 / CCS generated files for the EnDat bring-up project.
+Triton_1020GearRatio/endat22-F28379DLpad-S2/examples/PM_endat22_BasicPosAcc_DelComp/ENC1-CPU1_RAM/
+Triton_1020GearRatio/endat22-F28379DLpad-S2/examples/PM_endat22_BasicPosAcc_DelComp/.launches/
+Triton_1020GearRatio/endat22-F28379DLpad-S2/examples/PM_endat22_BasicPosAcc_DelComp/.theia/
+
+# Local EnDat capture files.
+endat_capture*.csv
+Triton_1020GearRatio/endat_capture*.csv
