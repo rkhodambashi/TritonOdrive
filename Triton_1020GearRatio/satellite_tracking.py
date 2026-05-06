@@ -15,6 +15,17 @@ from skyfield.api import EarthSatellite, Topos, load, utc
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+try:
+    from endat_serial_reader import (
+        DEFAULT_BAUD as ENDAT_DEFAULT_BAUD,
+        DEFAULT_COUNTS_PER_REV as ENDAT_DEFAULT_COUNTS_PER_REV,
+        EndatSerialReader,
+    )
+except Exception:
+    ENDAT_DEFAULT_BAUD = 115200
+    ENDAT_DEFAULT_COUNTS_PER_REV = 1 << 25
+    EndatSerialReader = None
+
 matplotlib.use("TkAgg")
 
 EPS = 1e-10
@@ -138,6 +149,13 @@ TRACK_Y_MOTOR_VEL_GAIN_RAMP_IN_SEC = 4.0
 TRACK_Y_VEL_FF_ATTENUATE_START_DEG = 100.0
 TRACK_Y_VEL_FF_ATTENUATE_STOP_DEG = 101.0
 TRACK_Y_VEL_FF_ATTENUATE_SCALE = 1.0
+TRACK_ENDAT_X_ENABLE = False
+TRACK_ENDAT_X_USE_FOR_CONTROL = False
+TRACK_ENDAT_X_PORT = "COM6"
+TRACK_ENDAT_X_BAUD = ENDAT_DEFAULT_BAUD
+TRACK_ENDAT_X_COUNTS_PER_REV = ENDAT_DEFAULT_COUNTS_PER_REV
+TRACK_ENDAT_X_ZERO_COUNT = 0
+TRACK_ENDAT_X_SIGN = 1.0
 
 ENCODER_ID_NAMES = {
     value: name
@@ -318,6 +336,14 @@ def quantize_spi_position_deg(position_deg, skip_bits):
     effective_bits = TRACK_SPI_ENCODER_BITS - skip_bits
     step_deg = 360.0 / float(1 << effective_bits)
     return round(position_deg / step_deg) * step_deg
+
+
+def wrap_degrees_signed(angle_deg):
+    return ((angle_deg + 180.0) % 360.0) - 180.0
+
+
+def endat_angle_to_axis_deg(angle_deg, sign):
+    return float(sign) * wrap_degrees_signed(angle_deg)
 
 
 def benedict_bordner_beta(alpha, beta_scale):
@@ -950,6 +976,13 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.y_vel_ff_attenuate_start_deg = TRACK_Y_VEL_FF_ATTENUATE_START_DEG
         self.y_vel_ff_attenuate_stop_deg = TRACK_Y_VEL_FF_ATTENUATE_STOP_DEG
         self.y_vel_ff_attenuate_scale = TRACK_Y_VEL_FF_ATTENUATE_SCALE
+        self.endat_x_enable = TRACK_ENDAT_X_ENABLE
+        self.endat_x_use_for_control = TRACK_ENDAT_X_USE_FOR_CONTROL
+        self.endat_x_port = TRACK_ENDAT_X_PORT
+        self.endat_x_baud = TRACK_ENDAT_X_BAUD
+        self.endat_x_counts_per_rev = TRACK_ENDAT_X_COUNTS_PER_REV
+        self.endat_x_zero_count = TRACK_ENDAT_X_ZERO_COUNT
+        self.endat_x_sign = TRACK_ENDAT_X_SIGN
         self.velocity_controller_mode = TRACK_VELOCITY_CONTROLLER_MODE
         self.velocity_debug_scale = TRACK_VELOCITY_DEBUG_SCALE
         y_motor_vel_gain_default = (
@@ -991,6 +1024,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.display_map = []
         self.satellite_labels = []
         self.reference_mode_var = tk.StringVar(value="live")
+        self.endat_x_enable_var = tk.IntVar(value=int(bool(self.endat_x_enable)))
+        self.endat_x_use_for_control_var = tk.IntVar(value=int(bool(self.endat_x_use_for_control)))
         self.replay_path = None
         self.replay_samples = []
 
@@ -1123,8 +1158,30 @@ class SatelliteTrackingWindow(tk.Toplevel):
         self.prepoint_lead_entry.grid(row=3, column=3, padx=5, pady=2)
         self.prepoint_lead_entry.insert(0, f"{self.prepoint_lead_time_sec:g}")
 
+        ttk.Checkbutton(settings_frame, text="EnDat X", variable=self.endat_x_enable_var).grid(
+            row=4, column=2, sticky="w", padx=(18, 5), pady=2
+        )
+        ttk.Checkbutton(settings_frame, text="Use X Ctrl", variable=self.endat_x_use_for_control_var).grid(
+            row=4, column=3, sticky="w", padx=5, pady=2
+        )
+
+        ttk.Label(settings_frame, text="EnDat Port").grid(row=5, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.endat_x_port_entry = ttk.Entry(settings_frame, width=10)
+        self.endat_x_port_entry.grid(row=5, column=3, padx=5, pady=2)
+        self.endat_x_port_entry.insert(0, self.endat_x_port)
+
+        ttk.Label(settings_frame, text="EnDat Zero").grid(row=6, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.endat_x_zero_entry = ttk.Entry(settings_frame, width=10)
+        self.endat_x_zero_entry.grid(row=6, column=3, padx=5, pady=2)
+        self.endat_x_zero_entry.insert(0, f"{self.endat_x_zero_count:g}")
+
+        ttk.Label(settings_frame, text="EnDat Sign").grid(row=7, column=2, sticky="w", padx=(18, 5), pady=2)
+        self.endat_x_sign_entry = ttk.Entry(settings_frame, width=10)
+        self.endat_x_sign_entry.grid(row=7, column=3, padx=5, pady=2)
+        self.endat_x_sign_entry.insert(0, f"{self.endat_x_sign:g}")
+
         ttk.Button(settings_frame, text="Apply", command=self.apply_tracking_settings).grid(
-            row=6, column=0, columnspan=4, pady=6
+            row=8, column=0, columnspan=4, pady=6
         )
 
         settings_frame.columnconfigure(0, weight=0)
@@ -1512,6 +1569,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
             capture_error = float(self.capture_error_entry.get())
             rebuild_margin = float(self.rebuild_margin_entry.get())
             prepoint_lead = float(self.prepoint_lead_entry.get())
+            endat_x_enable = bool(self.endat_x_enable_var.get())
+            endat_x_use_for_control = bool(self.endat_x_use_for_control_var.get())
+            endat_x_port = self.endat_x_port_entry.get().strip()
+            endat_x_zero_count = int(float(self.endat_x_zero_entry.get()))
+            endat_x_sign = float(self.endat_x_sign_entry.get())
 
             if (
                 cmd_interval <= 0
@@ -1524,6 +1586,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 or capture_error <= 0
                 or rebuild_margin <= 0
                 or prepoint_lead <= 0
+                or (endat_x_enable and not endat_x_port)
+                or endat_x_zero_count < 0
+                or endat_x_sign == 0
             ):
                 raise ValueError
             if point_spacing > horizon:
@@ -1543,6 +1608,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
             self.track_capture_error_deg = capture_error
             self.trajectory_rebuild_margin_sec = rebuild_margin
             self.prepoint_lead_time_sec = prepoint_lead
+            self.endat_x_enable = endat_x_enable
+            self.endat_x_use_for_control = endat_x_use_for_control
+            self.endat_x_port = endat_x_port
+            self.endat_x_zero_count = endat_x_zero_count
+            self.endat_x_sign = endat_x_sign
             return True
         except Exception:
             messagebox.showerror(
@@ -1552,7 +1622,8 @@ class SatelliteTrackingWindow(tk.Toplevel):
                     "Lead can be zero or positive.\n"
                     "Point spacing cannot exceed horizon.\n"
                     "Rebuild margin must be smaller than horizon.\n"
-                    "Min spacing cannot exceed point spacing."
+                    "Min spacing cannot exceed point spacing.\n"
+                    "EnDat port cannot be blank when enabled; zero count must be non-negative; sign cannot be zero."
                 ),
             )
             return False
@@ -1964,6 +2035,15 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 "y_actual_vel_deg_per_s",
                 "x_spi_sample_deg",
                 "y_spi_sample_deg",
+                "x_measurement_source",
+                "x_endat_raw_count",
+                "x_endat_abs_deg",
+                "x_endat_axis_deg",
+                "x_endat_age_sec",
+                "x_endat_error1",
+                "x_endat_error2",
+                "x_endat_timeout_step",
+                "x_endat_read_ms",
                 "x_benedict_bordner_enabled",
                 "y_benedict_bordner_enabled",
                 "x_benedict_bordner_alpha",
@@ -2329,7 +2409,20 @@ class SatelliteTrackingWindow(tk.Toplevel):
 
         loop_exception = None
         loop_traceback = None
+        endat_x_reader = None
         try:
+            if self.endat_x_enable:
+                if EndatSerialReader is None:
+                    raise RuntimeError("EnDat reader is unavailable. Install pyserial and ensure endat_serial_reader.py is present.")
+                endat_x_reader = EndatSerialReader(
+                    self.endat_x_port,
+                    baud=self.endat_x_baud,
+                    counts_per_rev=self.endat_x_counts_per_rev,
+                    zero_count=self.endat_x_zero_count,
+                    timeout_s=0.0,
+                )
+                endat_x_reader.open()
+
             while self.running and sat_index == self.current_sat_index:
                 loop_start_monotonic = time.perf_counter()
                 observed_loop_period_sec = (
@@ -2606,6 +2699,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
                 y_actual_raw = None
                 x_actual_sample = None
                 y_actual_sample = None
+                x_spi_sample_for_log = None
+                x_measurement_source = "spi"
+                x_endat_sample = None
+                x_endat_raw_count = None
+                x_endat_abs_deg = None
+                x_endat_axis_deg = None
+                x_endat_age_sec = None
+                x_endat_error1 = None
+                x_endat_error2 = None
+                x_endat_timeout_step = None
+                x_endat_read_ms = 0.0
                 x_bb_active = False
                 y_bb_active = False
                 x_actual_vel = 0.0
@@ -2691,7 +2795,29 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         x_actual_raw = self.control.get_spi_position("x")
                         x_actual_sample = quantize_spi_position_deg(x_actual_raw, self.spi_position_skip_bits_x)
                         spi_x_done = time.perf_counter()
+                        x_spi_sample_for_log = x_actual_sample
                         meas_x_elapsed_sec = spi_x_done - tracking_start_perf
+                        if endat_x_reader is not None:
+                            endat_x_read_start = time.perf_counter()
+                            x_endat_sample = endat_x_reader.read_latest_available()
+                            endat_x_read_done = time.perf_counter()
+                            x_endat_read_ms = (endat_x_read_done - endat_x_read_start) * 1000.0
+                            if x_endat_sample is not None:
+                                x_endat_raw_count = x_endat_sample.pos32
+                                x_endat_abs_deg = x_endat_sample.angle_deg
+                                x_endat_axis_deg = endat_angle_to_axis_deg(
+                                    x_endat_abs_deg,
+                                    self.endat_x_sign,
+                                )
+                                x_endat_age_sec = max(0.0, time.monotonic() - x_endat_sample.timestamp_s)
+                                x_endat_error1 = x_endat_sample.error1
+                                x_endat_error2 = x_endat_sample.error2
+                                x_endat_timeout_step = x_endat_sample.timeout_step
+                                if self.endat_x_use_for_control:
+                                    x_actual_raw = x_endat_axis_deg
+                                    x_actual_sample = x_endat_axis_deg
+                                    x_measurement_source = "endat"
+                                    meas_x_elapsed_sec = endat_x_read_done - tracking_start_perf
                         x_bb_active = self.benedict_bordner_enable_x >= 0.5
                         if x_bb_active:
                             x_bb_beta = benedict_bordner_beta(
@@ -2873,6 +2999,9 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         y_actual_raw = None
                         x_actual_sample = None
                         y_actual_sample = None
+                        x_spi_sample_for_log = None
+                        x_measurement_source = "error"
+                        x_endat_sample = None
                         x_bb_active = False
                         y_bb_active = False
 
@@ -3259,6 +3388,12 @@ class SatelliteTrackingWindow(tk.Toplevel):
                             rise_eta_text,
                             rise_local_text,
                             f"X Actual: {x_actual:.3f}" if x_actual is not None else "X Actual: -",
+                            f"X Source: {x_measurement_source}",
+                            (
+                                f"X EnDat: {x_endat_axis_deg:.3f} ({x_endat_age_sec:.3f}s)"
+                                if x_endat_axis_deg is not None and x_endat_age_sec is not None
+                                else "X EnDat: -"
+                            ),
                             f"Y Actual: {y_actual:.3f}" if y_actual is not None else "Y Actual: -",
                             f"X Cmd Error: {x_error:.3f}",
                             f"Y Cmd Error: {y_error:.3f}",
@@ -3534,8 +3669,17 @@ class SatelliteTrackingWindow(tk.Toplevel):
                         f"{y_actual_vel_raw:.6f}",
                         f"{x_actual_vel:.6f}",
                         f"{y_actual_vel:.6f}",
-                        "" if x_actual_sample is None else f"{x_actual_sample:.6f}",
+                        "" if x_spi_sample_for_log is None else f"{x_spi_sample_for_log:.6f}",
                         "" if y_actual_sample is None else f"{y_actual_sample:.6f}",
+                        x_measurement_source,
+                        "" if x_endat_raw_count is None else str(x_endat_raw_count),
+                        "" if x_endat_abs_deg is None else f"{x_endat_abs_deg:.6f}",
+                        "" if x_endat_axis_deg is None else f"{x_endat_axis_deg:.6f}",
+                        "" if x_endat_age_sec is None else f"{x_endat_age_sec:.6f}",
+                        "" if x_endat_error1 is None else str(x_endat_error1),
+                        "" if x_endat_error2 is None else str(x_endat_error2),
+                        "" if x_endat_timeout_step is None else str(x_endat_timeout_step),
+                        f"{x_endat_read_ms:.6f}",
                         str(int(x_bb_active)),
                         str(int(y_bb_active)),
                         f"{self.benedict_bordner_alpha_x:.6f}",
@@ -3754,6 +3898,11 @@ class SatelliteTrackingWindow(tk.Toplevel):
             loop_exception = exc
             loop_traceback = traceback.format_exc()
         finally:
+            if endat_x_reader is not None:
+                try:
+                    endat_x_reader.close()
+                except Exception:
+                    pass
             try:
                 log_file.close()
             except Exception:
