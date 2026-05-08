@@ -126,15 +126,18 @@ class EndatSerialReader:
         if len(fields) < 9 or not fields[0].isdigit():
             return None
 
-        loop = int(fields[0])
-        pos_hi = int(fields[1])
-        pos_lo = int(fields[2])
-        pos32 = int(fields[3])
-        position_clocks = int(fields[4])
-        error1 = int(fields[5])
-        error2 = int(fields[6])
-        timeout_step = int(fields[7])
-        timeout_loops = int(fields[8])
+        try:
+            loop = int(fields[0])
+            pos_hi = int(fields[1])
+            pos_lo = int(fields[2])
+            pos32 = int(fields[3])
+            position_clocks = int(fields[4])
+            error1 = int(fields[5])
+            error2 = int(fields[6])
+            timeout_step = int(fields[7])
+            timeout_loops = int(fields[8])
+        except ValueError:
+            return None
 
         return EndatSample(
             loop=loop,

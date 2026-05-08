@@ -17,6 +17,9 @@ from matplotlib.figure import Figure
 axis_devices = {"x": None, "y": None}
 
 logging_active = False
+position_loop_after_id = None
+ENDAT_DEFAULT_BAUD = control.ENDAT_DEFAULT_BAUD
+ENDAT_DEFAULT_COUNTS_PER_REV = control.ENDAT_DEFAULT_COUNTS_PER_REV
 velocity_ramp_stop_event = threading.Event()
 velocity_ramp_thread = None
 SAFE_VELOCITY_RAMP_MAX_DEG_S = 6.0
@@ -39,6 +42,99 @@ def _safe_call(func, fallback=None):
 def _set_entry(entry, value):
     entry.delete(0, tk.END)
     entry.insert(0, value)
+
+
+def connect_endat_x():
+    port = endat_port_entry.get().strip()
+    if not port:
+        status_label.config(text="EnDat port is blank")
+        return
+
+    try:
+        control.connect_endat(
+            "x",
+            port=port,
+            baud=ENDAT_DEFAULT_BAUD,
+            counts_per_rev=ENDAT_DEFAULT_COUNTS_PER_REV,
+            home_raw=float(endat_zero_entry.get()),
+            sign=float(endat_sign_entry.get()),
+        )
+        status_label.config(text=f"Connected shared EnDat X on {port}")
+    except Exception as exc:
+        status_label.config(text=f"EnDat X connection failed: {exc}")
+
+
+def disconnect_endat_x():
+    try:
+        control.disconnect_endat("x")
+    except Exception:
+        pass
+    x_endat_raw_var.set("-")
+    x_endat_axis_var.set("-")
+    status_label.config(text="Disconnected EnDat X")
+
+
+def read_endat_x_sample():
+    if not control.is_endat_connected("x"):
+        return None
+    try:
+        control.configure_endat(
+            "x",
+            counts_per_rev=ENDAT_DEFAULT_COUNTS_PER_REV,
+            home_raw=float(endat_zero_entry.get()),
+            sign=float(endat_sign_entry.get()),
+        )
+        return control.read_endat_sample("x")
+    except Exception:
+        return None
+
+
+def wrap_degrees_signed(angle_deg):
+    return ((angle_deg + 180.0) % 360.0) - 180.0
+
+
+def get_endat_x_zero_count():
+    value = float(endat_zero_entry.get())
+    if abs(value) > 1.0:
+        return int(value) % ENDAT_DEFAULT_COUNTS_PER_REV
+    return int(round((value % 1.0) * ENDAT_DEFAULT_COUNTS_PER_REV))
+
+
+def get_endat_x_home_raw_default():
+    return float(control.AXIS_CONFIG["x"].get("endat_home_raw", 0.0))
+
+
+def get_endat_x_sign():
+    return float(endat_sign_entry.get())
+
+
+def endat_x_sample_to_axis_deg(sample):
+    return control.get_endat_axis_deg("x", sample)
+
+
+def read_endat_x_measurement():
+    sample = read_endat_x_sample()
+    if sample is None:
+        return None, None
+    axis_deg = endat_x_sample_to_axis_deg(sample)
+    return sample.pos32 / ENDAT_DEFAULT_COUNTS_PER_REV, axis_deg
+
+
+def set_endat_x_zero_from_current():
+    sample = read_endat_x_sample()
+    if sample is None:
+        status_label.config(text="Cannot set EnDat X zero: no sample")
+        return
+    home_raw = sample.pos32 / ENDAT_DEFAULT_COUNTS_PER_REV
+    _set_entry(endat_zero_entry, f"{home_raw:.9f}")
+    try:
+        control.configure_endat("x", home_raw=home_raw, sign=float(endat_sign_entry.get()))
+        control.update_external_position("x", 0.0, source="endat", timestamp=sample.timestamp_s)
+        control.set_position_feedback_source("x", "external")
+        control.align_motor_home_to_current_position("x")
+    except Exception:
+        pass
+    status_label.config(text=f"EnDat X home raw set to {home_raw:.9f}; X feedback position is now 0 deg")
 
 
 def refresh_config_entries():
@@ -70,24 +166,34 @@ def connect_odrive():
     root.update()
 
     try:
+        control.set_force_spi_load_encoder_on_connect(bool(force_spi_load_encoder_var.get()))
         devices = control.connect_all()
         axis_devices.update(devices)
+        apply_positioning_defaults()
+        refresh_config_entries()
+        load_policy = "forced SPI load encoder" if force_spi_load_encoder_var.get() else "ODrive load encoder unchanged"
         status_label.config(
             text=(
-                "Connected & Initialized\n"
+                f"Connected & Initialized; {load_policy}; positioning gains/trajectory applied\n"
                 f"X: {control.get_serial_number('x')}\n"
                 f"Y: {control.get_serial_number('y')}"
             )
         )
-        refresh_config_entries()
-        update_position_loop()
+        start_position_loop()
     except TimeoutError as e:
         status_label.config(text=f"Initialization timeout: {e}")
     except Exception as e:
         status_label.config(text=f"Connection Failed: {e}")
 
 
+def start_position_loop():
+    global position_loop_after_id
+    if position_loop_after_id is None:
+        update_position_loop()
+
+
 def update_position_loop():
+    global position_loop_after_id
     x_position = _safe_call(lambda: control.get_current_position("x"))
     x_spi_raw = _safe_call(lambda: control.get_spi_raw("x"))
     x_motor_raw = _safe_call(lambda: control.get_motor_raw("x"))
@@ -97,13 +203,24 @@ def update_position_loop():
     x_procedure_result = _safe_call(lambda: control.get_procedure_result("x"))
     x_input_pos = _safe_call(lambda: control.get_input_pos("x"))
     x_velocity = _safe_call(lambda: control.get_motor_velocity("x"))
+    x_control_mode = _safe_call(lambda: control.get_control_mode("x"))
+    x_input_mode = _safe_call(lambda: control.get_input_mode("x"))
+    x_load_encoder = _safe_call(lambda: control.get_load_encoder("x"))
+    x_feedback_source = _safe_call(lambda: control.get_position_feedback_source("x"))
+    x_endat_turns, x_endat_axis_deg = _safe_call(read_endat_x_measurement, (None, None))
 
     if x_position is not None:
         x_position_var.set(f"{x_position:.3f} deg")
+    else:
+        x_position_var.set("stale/-")
     if x_spi_raw is not None:
         x_spi_raw_var.set(f"{x_spi_raw:.6f}")
     if x_motor_raw is not None:
         x_motor_raw_var.set(f"{x_motor_raw:.6f}")
+    if x_endat_turns is not None:
+        x_endat_raw_var.set(f"{x_endat_turns:.6f}")
+    if x_endat_axis_deg is not None:
+        x_endat_axis_var.set(f"{x_endat_axis_deg:.3f} deg")
 
     x_fault_var.set(
         f"State: {x_state if x_state is not None else '-'}   "
@@ -119,7 +236,12 @@ def update_position_loop():
         f"Cmd: {f'{x_input_pos:.6f}' if x_input_pos is not None else '-'}   "
         f"Est: {f'{x_motor_raw:.6f}' if x_motor_raw is not None else '-'}   "
         f"Vel: {f'{x_velocity:.6f}' if x_velocity is not None else '-'}   "
-        f"Angle: {f'{x_position:.3f}' if x_position is not None else '-'}"
+        f"Angle: {f'{x_position:.3f}' if x_position is not None else '-'}   "
+        f"Ctrl/In/Load: "
+        f"{x_control_mode if x_control_mode is not None else '-'}/"
+        f"{x_input_mode if x_input_mode is not None else '-'}/"
+        f"{x_load_encoder if x_load_encoder is not None else '-'}   "
+        f"Feedback: {x_feedback_source if x_feedback_source is not None else '-'}"
     )
 
     y_position = _safe_call(lambda: control.get_current_position("y"))
@@ -131,9 +253,15 @@ def update_position_loop():
     y_procedure_result = _safe_call(lambda: control.get_procedure_result("y"))
     y_input_pos = _safe_call(lambda: control.get_input_pos("y"))
     y_velocity = _safe_call(lambda: control.get_motor_velocity("y"))
+    y_control_mode = _safe_call(lambda: control.get_control_mode("y"))
+    y_input_mode = _safe_call(lambda: control.get_input_mode("y"))
+    y_load_encoder = _safe_call(lambda: control.get_load_encoder("y"))
+    y_feedback_source = _safe_call(lambda: control.get_position_feedback_source("y"))
 
     if y_position is not None:
         y_position_var.set(f"{y_position:.3f} deg")
+    else:
+        y_position_var.set("stale/-")
     if y_spi_raw is not None:
         y_spi_raw_var.set(f"{y_spi_raw:.6f}")
     if y_motor_raw is not None:
@@ -153,32 +281,94 @@ def update_position_loop():
         f"Cmd: {f'{y_input_pos:.6f}' if y_input_pos is not None else '-'}   "
         f"Est: {f'{y_motor_raw:.6f}' if y_motor_raw is not None else '-'}   "
         f"Vel: {f'{y_velocity:.6f}' if y_velocity is not None else '-'}   "
-        f"Angle: {f'{y_position:.3f}' if y_position is not None else '-'}"
+        f"Angle: {f'{y_position:.3f}' if y_position is not None else '-'}   "
+        f"Ctrl/In/Load: "
+        f"{y_control_mode if y_control_mode is not None else '-'}/"
+        f"{y_input_mode if y_input_mode is not None else '-'}/"
+        f"{y_load_encoder if y_load_encoder is not None else '-'}   "
+        f"Feedback: {y_feedback_source if y_feedback_source is not None else '-'}"
     )
 
-    root.after(100, update_position_loop)
+    position_loop_after_id = root.after(100, update_position_loop)
+
+
+def axis_fault_summary(axis):
+    active_errors = _safe_call(lambda: control.get_active_errors(axis))
+    disarm_reason = _safe_call(lambda: control.get_disarm_reason(axis))
+    axis_state = _safe_call(lambda: control.get_axis_state(axis))
+    procedure_result = _safe_call(lambda: control.get_procedure_result(axis))
+    selected_pos = _safe_call(lambda: control.get_current_position(axis))
+    feedback_source = _safe_call(lambda: control.get_position_feedback_source(axis))
+    load_encoder = _safe_call(lambda: control.get_load_encoder(axis))
+    return (
+        f"{axis.upper()} state={axis_state if axis_state is not None else '-'} "
+        f"active=0x{active_errors:X}" if active_errors is not None else
+        f"{axis.upper()} state={axis_state if axis_state is not None else '-'} active=-"
+    ) + (
+        f" disarm=0x{disarm_reason:X}" if disarm_reason is not None else " disarm=-"
+    ) + f" proc={procedure_result if procedure_result is not None else '-'}" + (
+        f" pos={selected_pos:.3f}" if selected_pos is not None else " pos=-"
+    ) + f" feedback={feedback_source if feedback_source is not None else '-'}" + (
+        f" load={load_encoder}" if load_encoder is not None else " load=-"
+    )
+
+
+def run_axis_command_async(label, func, kwargs, axis):
+    def runner():
+        try:
+            func(**kwargs)
+            root.after(0, lambda: status_label.config(text=f"{label} complete"))
+        except Exception as exc:
+            details = axis_fault_summary(axis)
+            error_text = str(exc)
+            root.after(0, lambda: status_label.config(text=f"{label} failed: {error_text}\n{details}"))
+
+    threading.Thread(target=runner, daemon=True).start()
+
+
+def disarm_axis(axis):
+    try:
+        control.disarm_axis(axis)
+        status_label.config(text=f"{axis.upper()} axis disarmed")
+    except Exception as exc:
+        status_label.config(text=f"{axis.upper()} disarm failed: {exc}")
+
+
+def recover_axis(axis):
+    apply_positioning_defaults()
+    run_axis_command_async(
+        f"Recover {axis.upper()} inward",
+        control.recover_axis_to_safe_range,
+        {"axis": axis},
+        axis,
+    )
 
 
 def go_home(axis):
-    threading.Thread(target=control.go_home, kwargs={"axis": axis}, daemon=True).start()
+    apply_positioning_defaults()
+    run_axis_command_async(f"Go Home {axis.upper()}", control.go_home, {"axis": axis}, axis)
 
 
 def move_relative(axis, delta):
-    threading.Thread(
-        target=control.move_relative,
-        kwargs={"delta_deg": delta, "axis": axis},
-        daemon=True,
-    ).start()
+    apply_positioning_defaults()
+    run_axis_command_async(
+        f"Move {axis.upper()} {delta:+g} deg",
+        control.move_relative,
+        {"delta_deg": delta, "axis": axis},
+        axis,
+    )
 
 
 def move_absolute(axis, entry):
     try:
         deg = float(entry.get())
-        threading.Thread(
-            target=control.move_absolute,
-            kwargs={"target_output_deg": deg, "axis": axis},
-            daemon=True,
-        ).start()
+        apply_positioning_defaults()
+        run_axis_command_async(
+            f"Move {axis.upper()} to {deg:g} deg",
+            control.move_absolute,
+            {"target_output_deg": deg, "axis": axis},
+            axis,
+        )
     except Exception:
         pass
 
@@ -207,9 +397,7 @@ def start_velocity_ramp_test():
     vel_2 = max(min(vel_2, SAFE_VELOCITY_RAMP_MAX_DEG_S), -SAFE_VELOCITY_RAMP_MAX_DEG_S)
 
     def axis_within_safe_travel():
-        pos = _safe_call(lambda: control.get_spi_position(axis), None)
-        if pos is None:
-            pos = _safe_call(lambda: control.get_current_position(axis), None)
+        pos = _safe_call(lambda: control.get_current_position(axis), None)
         if pos is None:
             return True
         if pos >= control.TRACKING_MAX_DEGREE - VELOCITY_RAMP_LIMIT_MARGIN_DEG and max(vel_1, vel_2) > 0:
@@ -371,6 +559,13 @@ def apply_traj_y():
         pass
 
 
+def apply_positioning_defaults():
+    apply_gains()
+    apply_gains_y()
+    apply_traj()
+    apply_traj_y()
+
+
 def open_satellite_tracking():
     SatelliteTrackingWindow(
         root,
@@ -451,7 +646,7 @@ class LivePlotFrame(ttk.LabelFrame):
         ttk.Button(control_frame, text="Stop Logging", command=self.stop_logging).pack(side="left", padx=5)
         ttk.Button(control_frame, text="Save CSV", command=self.save_csv).pack(side="left", padx=5)
 
-        self.fig = Figure(figsize=(8, 6), dpi=100)
+        self.fig = Figure(figsize=(5.8, 5.2), dpi=100)
         self.ax_x = self.fig.add_subplot(211)
         self.ax_y = self.fig.add_subplot(212)
 
@@ -552,12 +747,12 @@ class LivePlotFrame(ttk.LabelFrame):
 
 root = tk.Tk()
 root.title("ODrive Position Control GUI")
-root.geometry("1100x760")
+root.geometry("1280x760")
 
 main_frame = ttk.Frame(root)
 main_frame.pack(fill="both", expand=True)
 
-left_panel = ttk.Frame(main_frame, width=390)
+left_panel = ttk.Frame(main_frame, width=560)
 left_panel.pack(side="left", fill="y", padx=(10, 4), pady=10)
 left_panel.pack_propagate(False)
 
@@ -601,6 +796,12 @@ right_frame = ttk.Frame(main_frame)
 right_frame.pack(side="right", fill="both", expand=True, padx=(4, 10), pady=10)
 
 ttk.Button(left_frame, text="Connect ODrive", command=connect_odrive).pack(pady=5)
+force_spi_load_encoder_var = tk.IntVar(value=int(control.FORCE_SPI_LOAD_ENCODER_ON_CONNECT))
+ttk.Checkbutton(
+    left_frame,
+    text="Force ODrive load encoder = SPI",
+    variable=force_spi_load_encoder_var,
+).pack(anchor="w", padx=5)
 
 status_label = ttk.Label(left_frame, text="Not Connected")
 status_label.pack()
@@ -635,18 +836,52 @@ raw_frame.pack(fill="x", pady=5)
 ttk.Label(raw_frame, text="Axis").grid(row=0, column=0, padx=5)
 ttk.Label(raw_frame, text="ODrive Est (turns)").grid(row=0, column=1, padx=5)
 ttk.Label(raw_frame, text="SPI Encoder (turns)").grid(row=0, column=2, padx=5)
+ttk.Label(raw_frame, text="EnDat Encoder (turns)").grid(row=0, column=3, padx=5)
 
 ttk.Label(raw_frame, text="X").grid(row=1, column=0)
 x_motor_raw_var = tk.StringVar(value="0")
 x_spi_raw_var = tk.StringVar(value="0")
+x_endat_raw_var = tk.StringVar(value="-")
+x_endat_axis_var = tk.StringVar(value="-")
 ttk.Label(raw_frame, textvariable=x_motor_raw_var).grid(row=1, column=1)
 ttk.Label(raw_frame, textvariable=x_spi_raw_var).grid(row=1, column=2)
+ttk.Label(raw_frame, textvariable=x_endat_raw_var).grid(row=1, column=3)
 
 ttk.Label(raw_frame, text="Y").grid(row=2, column=0)
 y_motor_raw_var = tk.StringVar(value="0")
 y_spi_raw_var = tk.StringVar(value="0")
 ttk.Label(raw_frame, textvariable=y_motor_raw_var).grid(row=2, column=1)
 ttk.Label(raw_frame, textvariable=y_spi_raw_var).grid(row=2, column=2)
+ttk.Label(raw_frame, text="-").grid(row=2, column=3)
+
+endat_frame = ttk.Frame(left_frame)
+endat_frame.pack(fill="x", pady=3)
+ttk.Label(endat_frame, text="EnDat X Port").grid(row=0, column=0, padx=5, pady=2)
+endat_port_entry = ttk.Entry(endat_frame, width=8)
+endat_port_entry.insert(0, "COM6")
+endat_port_entry.grid(row=0, column=1, padx=5, pady=2)
+ttk.Button(endat_frame, text="Connect EnDat X", command=connect_endat_x).grid(
+    row=0, column=2, columnspan=2, sticky="ew", padx=5, pady=2
+)
+ttk.Button(endat_frame, text="Disconnect", command=disconnect_endat_x).grid(
+    row=0, column=4, sticky="ew", padx=5, pady=2
+)
+ttk.Label(endat_frame, text="Axis").grid(row=1, column=0, padx=5, pady=2)
+ttk.Label(endat_frame, textvariable=x_endat_axis_var).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+ttk.Label(endat_frame, text="Home Raw").grid(row=1, column=2, padx=5, pady=2)
+endat_zero_entry = ttk.Entry(endat_frame, width=10)
+endat_zero_entry.insert(0, f"{get_endat_x_home_raw_default():.9f}")
+endat_zero_entry.grid(row=1, column=3, padx=5, pady=2)
+ttk.Button(endat_frame, text="Set Zero", command=set_endat_x_zero_from_current).grid(
+    row=1, column=4, sticky="ew", padx=5, pady=2
+)
+ttk.Label(endat_frame, text="Sign").grid(row=2, column=0, padx=5, pady=2)
+endat_sign_entry = ttk.Entry(endat_frame, width=6)
+endat_sign_entry.insert(0, "1")
+endat_sign_entry.grid(row=2, column=1, padx=5, pady=2)
+ttk.Label(endat_frame, text="Display only here; tracking can use it as X feedback").grid(
+    row=2, column=2, columnspan=3, sticky="w", padx=5, pady=2
+)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
@@ -654,6 +889,10 @@ home_frame = ttk.Frame(left_frame)
 home_frame.pack(fill="x")
 ttk.Button(home_frame, text="Go Home X", command=lambda: go_home("x")).grid(row=0, column=0, padx=5, pady=5)
 ttk.Button(home_frame, text="Go Home Y", command=lambda: go_home("y")).grid(row=0, column=1, padx=5, pady=5)
+ttk.Button(home_frame, text="Disarm X", command=lambda: disarm_axis("x")).grid(row=0, column=2, padx=5, pady=5)
+ttk.Button(home_frame, text="Disarm Y", command=lambda: disarm_axis("y")).grid(row=0, column=3, padx=5, pady=5)
+ttk.Button(home_frame, text="Recover X", command=lambda: recover_axis("x")).grid(row=1, column=0, padx=5, pady=5)
+ttk.Button(home_frame, text="Recover Y", command=lambda: recover_axis("y")).grid(row=1, column=1, padx=5, pady=5)
 
 ttk.Separator(left_frame).pack(fill="x", pady=10)
 
