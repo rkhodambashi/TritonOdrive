@@ -97,11 +97,6 @@ def vendor_init_axis(axis: str) -> None:
     run_worker(f"Vendor Init {axis.upper()}", action)
 
 
-def connect_both() -> None:
-    connect_axis("x")
-    connect_axis("y")
-
-
 def close_channel() -> None:
     def action():
         controller.close()
@@ -197,6 +192,12 @@ root = tk.Tk()
 root.title("Technosoft Ex04 BasicMove Python Port")
 root.geometry("1180x760")
 
+style = ttk.Style(root)
+style.configure("Axis.TLabelframe", background="#cfcfcf")
+style.configure("Axis.TLabelframe.Label", background="#cfcfcf")
+style.configure("AxisInner.TLabelframe", background="#d7eeee")
+style.configure("AxisInner.TLabelframe.Label", background="#d7eeee")
+
 main = ttk.Frame(root, padding=8)
 main.pack(fill="both", expand=True)
 main.columnconfigure(1, weight=1)
@@ -210,24 +211,27 @@ speed_deg_s_var = tk.StringVar(value="1.0")
 accel_deg_s2_var = tk.StringVar(value="2.0")
 decel_deg_s2_var = tk.StringVar(value="2.0")
 
-ttk.Label(main, text="Channel").grid(row=0, column=0, sticky="w")
-ttk.Entry(main, textvariable=channel_var, width=10).grid(row=0, column=1, sticky="w")
-ttk.Label(main, text="Type").grid(row=0, column=2, sticky="e")
-ttk.Entry(main, textvariable=channel_type_var, width=10).grid(row=0, column=3, sticky="w")
-ttk.Label(main, text="Host").grid(row=0, column=4, sticky="e")
-ttk.Entry(main, textvariable=host_id_var, width=10).grid(row=0, column=5, sticky="w")
-ttk.Label(main, text="Baud").grid(row=0, column=6, sticky="e")
-ttk.Entry(main, textvariable=baudrate_var, width=12).grid(row=0, column=7, sticky="w")
+comm_frame = ttk.LabelFrame(main, text="Communication", padding=8)
+comm_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+ttk.Label(comm_frame, text="Channel").grid(row=0, column=0, sticky="w")
+ttk.Entry(comm_frame, textvariable=channel_var, width=10).grid(row=0, column=1, sticky="w", padx=(2, 10))
+ttk.Label(comm_frame, text="Type").grid(row=0, column=2, sticky="e")
+ttk.Entry(comm_frame, textvariable=channel_type_var, width=10).grid(row=0, column=3, sticky="w", padx=(2, 10))
+ttk.Label(comm_frame, text="Host").grid(row=0, column=4, sticky="e")
+ttk.Entry(comm_frame, textvariable=host_id_var, width=10).grid(row=0, column=5, sticky="w", padx=(2, 10))
+ttk.Label(comm_frame, text="Baud").grid(row=0, column=6, sticky="e")
+ttk.Entry(comm_frame, textvariable=baudrate_var, width=12).grid(row=0, column=7, sticky="w", padx=(2, 10))
+ttk.Button(comm_frame, text="Close Channel", command=close_channel).grid(row=0, column=8, sticky="ew", padx=4)
 
-ttk.Label(main, text="Speed deg/s").grid(row=1, column=0, sticky="w")
-ttk.Entry(main, textvariable=speed_deg_s_var, width=10).grid(row=1, column=1, sticky="w")
-ttk.Label(main, text="Accel deg/s2").grid(row=1, column=2, sticky="e")
-ttk.Entry(main, textvariable=accel_deg_s2_var, width=10).grid(row=1, column=3, sticky="w")
-ttk.Label(main, text="Decel deg/s2").grid(row=1, column=4, sticky="e")
-ttk.Entry(main, textvariable=decel_deg_s2_var, width=10).grid(row=1, column=5, sticky="w")
-ttk.Button(main, text="Set Motion Params", command=set_motion_params).grid(row=1, column=6, sticky="ew", padx=4)
-ttk.Button(main, text="Connect Both", command=connect_both).grid(row=1, column=7, sticky="ew", padx=4)
-ttk.Button(main, text="Close Channel", command=close_channel).grid(row=1, column=8, sticky="ew", padx=4)
+motion_param_frame = ttk.LabelFrame(main, text="Position Move Profile", padding=8)
+motion_param_frame.grid(row=0, column=4, columnspan=4, sticky="ew", pady=(0, 6), padx=(8, 0))
+ttk.Label(motion_param_frame, text="Speed deg/s").grid(row=0, column=0, sticky="w")
+ttk.Entry(motion_param_frame, textvariable=speed_deg_s_var, width=10).grid(row=0, column=1, sticky="w", padx=(2, 10))
+ttk.Label(motion_param_frame, text="Accel deg/s2").grid(row=0, column=2, sticky="e")
+ttk.Entry(motion_param_frame, textvariable=accel_deg_s2_var, width=10).grid(row=0, column=3, sticky="w", padx=(2, 10))
+ttk.Label(motion_param_frame, text="Decel deg/s2").grid(row=0, column=4, sticky="e")
+ttk.Entry(motion_param_frame, textvariable=decel_deg_s2_var, width=10).grid(row=0, column=5, sticky="w", padx=(2, 10))
+ttk.Button(motion_param_frame, text="Apply Profile", command=set_motion_params).grid(row=0, column=6, sticky="ew", padx=4)
 
 axis_vars: dict[str, dict[str, tk.StringVar]] = {}
 pos_vars: dict[str, tk.StringVar] = {}
@@ -236,10 +240,11 @@ gain_vars: dict[str, dict[str, tk.StringVar]] = {}
 
 
 def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
-    frame = ttk.LabelFrame(main, text=f"{axis.upper()} Axis", padding=8)
+    frame = ttk.LabelFrame(main, text=f"{axis.upper()} Axis", padding=8, style="Axis.TLabelframe")
     frame.grid(row=row, column=0, columnspan=8, sticky="nsew", pady=8)
     frame.columnconfigure(1, weight=1)
-    frame.columnconfigure(3, weight=1)
+    frame.columnconfigure(0, weight=1)
+    frame.columnconfigure(1, weight=1)
 
     axis_vars[axis] = {
         "node_id": tk.StringVar(value=str(default_node_id)),
@@ -251,43 +256,51 @@ def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
     status_vars[axis] = tk.StringVar(value="")
     gain_vars[axis] = {name: tk.StringVar(value="") for name in GAIN_NAMES}
 
-    ttk.Label(frame, text="Node ID").grid(row=0, column=0, sticky="w")
-    ttk.Entry(frame, textvariable=axis_vars[axis]["node_id"], width=8).grid(row=0, column=1, sticky="w")
-    ttk.Label(frame, text="Output sign").grid(row=0, column=2, sticky="e")
-    ttk.Entry(frame, textvariable=axis_vars[axis]["sign"], width=8).grid(row=0, column=3, sticky="w")
-    ttk.Button(frame, text="Setup Only", command=lambda a=axis: connect_axis(a)).grid(row=0, column=4, padx=4)
-    ttk.Button(frame, text="Vendor Init", command=lambda a=axis: vendor_init_axis(a)).grid(row=0, column=5, padx=4)
+    startup_frame = ttk.LabelFrame(frame, text="Startup", padding=6, style="AxisInner.TLabelframe")
+    startup_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+    startup_frame.columnconfigure(1, weight=1)
+    ttk.Label(startup_frame, text="Node ID").grid(row=0, column=0, sticky="w")
+    ttk.Entry(startup_frame, textvariable=axis_vars[axis]["node_id"], width=8).grid(row=0, column=1, sticky="w", padx=(4, 12))
+    ttk.Label(startup_frame, text="Output sign").grid(row=0, column=2, sticky="e")
+    ttk.Entry(startup_frame, textvariable=axis_vars[axis]["sign"], width=8).grid(row=0, column=3, sticky="w", padx=(4, 12))
+    ttk.Button(startup_frame, text="Vendor Init", command=lambda a=axis: vendor_init_axis(a)).grid(row=0, column=4, padx=4)
+    ttk.Label(startup_frame, text=".t.zip").grid(row=1, column=0, sticky="w", pady=(6, 0))
+    ttk.Entry(startup_frame, textvariable=axis_vars[axis]["setup"], width=80).grid(row=1, column=1, columnspan=4, sticky="ew", pady=(6, 0))
 
-    ttk.Label(frame, text=".t.zip").grid(row=1, column=0, sticky="w")
-    ttk.Entry(frame, textvariable=axis_vars[axis]["setup"], width=100).grid(row=1, column=1, columnspan=6, sticky="ew")
+    feedback_frame = ttk.LabelFrame(frame, text="Live Feedback", padding=6, style="AxisInner.TLabelframe")
+    feedback_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+    feedback_frame.columnconfigure(1, weight=1)
+    ttk.Label(feedback_frame, text="Position").grid(row=0, column=0, sticky="w")
+    ttk.Label(feedback_frame, textvariable=pos_vars[axis]).grid(row=0, column=1, sticky="w")
+    ttk.Label(feedback_frame, text="Status").grid(row=1, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(feedback_frame, textvariable=status_vars[axis]).grid(row=1, column=1, sticky="w", pady=(6, 0))
 
-    ttk.Label(frame, text="Position").grid(row=2, column=0, sticky="w")
-    ttk.Label(frame, textvariable=pos_vars[axis]).grid(row=2, column=1, columnspan=6, sticky="w")
-    ttk.Label(frame, text="Status").grid(row=3, column=0, sticky="w")
-    ttk.Label(frame, textvariable=status_vars[axis]).grid(row=3, column=1, columnspan=6, sticky="w")
+    motion_frame = ttk.LabelFrame(frame, text="Position Moves", padding=6, style="AxisInner.TLabelframe")
+    motion_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=6)
+    ttk.Button(motion_frame, text="-1 deg", command=lambda a=axis: move_relative(a, -1.0)).grid(row=0, column=0, padx=3, pady=3)
+    ttk.Button(motion_frame, text="-0.2 deg", command=lambda a=axis: move_relative(a, -0.2)).grid(row=0, column=1, padx=3, pady=3)
+    ttk.Button(motion_frame, text="+0.2 deg", command=lambda a=axis: move_relative(a, 0.2)).grid(row=0, column=2, padx=3, pady=3)
+    ttk.Button(motion_frame, text="+1 deg", command=lambda a=axis: move_relative(a, 1.0)).grid(row=0, column=3, padx=3, pady=3)
+    ttk.Button(motion_frame, text="Home 0", command=lambda a=axis: go_home(a)).grid(row=0, column=4, padx=8, pady=3)
+    ttk.Label(motion_frame, text="Abs deg").grid(row=1, column=0, sticky="e", pady=(6, 0))
+    ttk.Entry(motion_frame, textvariable=axis_vars[axis]["abs_target"], width=10).grid(row=1, column=1, sticky="w", pady=(6, 0))
+    ttk.Button(motion_frame, text="Move Abs", command=lambda a=axis: move_absolute(a)).grid(row=1, column=2, padx=3, pady=(6, 0))
 
+    gains_frame = ttk.LabelFrame(frame, text="Controller Gains", padding=6, style="AxisInner.TLabelframe")
+    gains_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=6)
     for col, name in enumerate(GAIN_NAMES):
-        ttk.Label(frame, text=name).grid(row=4, column=col, sticky="w")
-        ttk.Entry(frame, textvariable=gain_vars[axis][name], width=10).grid(row=5, column=col, sticky="w")
-    ttk.Button(frame, text="Read Gains", command=lambda a=axis: read_gains(a)).grid(row=5, column=5, padx=4)
-    ttk.Button(frame, text="Apply Gains", command=lambda a=axis: apply_gains(a)).grid(row=5, column=6, padx=4)
+        ttk.Label(gains_frame, text=name).grid(row=0, column=col, sticky="w")
+        ttk.Entry(gains_frame, textvariable=gain_vars[axis][name], width=10).grid(row=1, column=col, sticky="w", padx=(0, 6))
+    ttk.Button(gains_frame, text="Read Gains", command=lambda a=axis: read_gains(a)).grid(row=1, column=5, padx=4)
+    ttk.Button(gains_frame, text="Apply Gains", command=lambda a=axis: apply_gains(a)).grid(row=1, column=6, padx=4)
 
-    ttk.Button(frame, text="DriveInit", command=lambda a=axis: axis_command(a, "DriveInit", lambda: controller.drive_initialisation(a))).grid(row=6, column=0, padx=3, pady=4)
-    ttk.Button(frame, text="Power On", command=lambda a=axis: axis_command(a, "Power On", lambda: controller.power(a, True))).grid(row=6, column=1, padx=3, pady=4)
-    ttk.Button(frame, text="Power Off", command=lambda a=axis: axis_command(a, "Power Off", lambda: controller.power(a, False))).grid(row=6, column=2, padx=3, pady=4)
-    ttk.Button(frame, text="Stop", command=lambda a=axis: axis_command(a, "Stop", lambda: controller.stop(a))).grid(row=6, column=3, padx=3, pady=4)
-    ttk.Button(frame, text="Reset Fault", command=lambda a=axis: axis_command(a, "Reset Fault", lambda: controller.reset_fault(a))).grid(row=6, column=4, padx=3, pady=4)
-    ttk.Button(frame, text="Wait Motion Done", command=lambda a=axis: axis_command(a, "Wait Motion Done", lambda: controller.wait_motion_complete(a))).grid(row=6, column=5, columnspan=2, padx=3, pady=4)
-    ttk.Button(frame, text="Set Vertical Zero", command=lambda a=axis: set_vertical_zero(a)).grid(row=6, column=7, padx=3, pady=4)
-
-    ttk.Button(frame, text="-1 deg", command=lambda a=axis: move_relative(a, -1.0)).grid(row=7, column=0, padx=3, pady=4)
-    ttk.Button(frame, text="-0.2 deg", command=lambda a=axis: move_relative(a, -0.2)).grid(row=7, column=1, padx=3, pady=4)
-    ttk.Button(frame, text="+0.2 deg", command=lambda a=axis: move_relative(a, 0.2)).grid(row=7, column=2, padx=3, pady=4)
-    ttk.Button(frame, text="+1 deg", command=lambda a=axis: move_relative(a, 1.0)).grid(row=7, column=3, padx=3, pady=4)
-    ttk.Button(frame, text="Home 0", command=lambda a=axis: go_home(a)).grid(row=7, column=4, padx=3, pady=4)
-    ttk.Label(frame, text="Abs deg").grid(row=7, column=5, sticky="e")
-    ttk.Entry(frame, textvariable=axis_vars[axis]["abs_target"], width=10).grid(row=7, column=6, sticky="w")
-    ttk.Button(frame, text="Move Abs", command=lambda a=axis: move_absolute(a)).grid(row=7, column=7, padx=3, pady=4)
+    safety_frame = ttk.LabelFrame(frame, text="Safety / Utilities", padding=6, style="AxisInner.TLabelframe")
+    safety_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    ttk.Button(safety_frame, text="Stop", command=lambda a=axis: axis_command(a, "Stop", lambda: controller.stop(a))).grid(row=0, column=0, padx=3, pady=3)
+    ttk.Button(safety_frame, text="Power Off", command=lambda a=axis: axis_command(a, "Power Off", lambda: controller.power(a, False))).grid(row=0, column=1, padx=3, pady=3)
+    ttk.Button(safety_frame, text="Reset Fault", command=lambda a=axis: axis_command(a, "Reset Fault", lambda: controller.reset_fault(a))).grid(row=0, column=2, padx=3, pady=3)
+    ttk.Button(safety_frame, text="Wait Motion Done", command=lambda a=axis: axis_command(a, "Wait Motion Done", lambda: controller.wait_motion_complete(a))).grid(row=0, column=3, padx=3, pady=3)
+    ttk.Button(safety_frame, text="Set Vertical Zero", command=lambda a=axis: set_vertical_zero(a)).grid(row=0, column=4, padx=3, pady=3)
 
 
 build_axis_frame("x", 2, 1)
