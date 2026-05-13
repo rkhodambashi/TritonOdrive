@@ -20,3 +20,9 @@ Triton_1020GearRatio/endat22-F28379DLpad-S2/examples/PM_endat22_BasicPosAcc_DelC
 # Local EnDat capture files.
 endat_capture*.csv
 Triton_1020GearRatio/endat_capture*.csv
+
+# Technosoft bring-up local recovery/diagnostic artifacts.
+Triton_1020GearRatio/recovery_candidates/
+Triton_1020GearRatio/technosoft_diagnostics/
+Triton_1020GearRatio/Technosoft8020_ACL60250_Motors_PositionInput_broken_*.py
+Triton_1020GearRatio/Technosoft8020_ACL60250_Motors_PositionInput_recovered.py
