@@ -181,6 +181,18 @@ def move_absolute(axis: str) -> None:
     axis_command(axis, f"move absolute {target:g} deg", lambda: controller.move_absolute_deg(axis, target))
 
 
+def go_home(axis: str) -> None:
+    axis_command(axis, "home / vertical 0", lambda: controller.move_absolute_deg(axis, 0.0))
+
+
+def set_vertical_zero(axis: str) -> None:
+    def action():
+        result = controller.current_vertical_zero_hardcode(axis)
+        return f"vertical zero now: {result['code_line']}"
+
+    axis_command(axis, "set vertical zero", action)
+
+
 root = tk.Tk()
 root.title("Technosoft Ex04 BasicMove Python Port")
 root.geometry("1180x760")
@@ -266,14 +278,16 @@ def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
     ttk.Button(frame, text="Stop", command=lambda a=axis: axis_command(a, "Stop", lambda: controller.stop(a))).grid(row=6, column=3, padx=3, pady=4)
     ttk.Button(frame, text="Reset Fault", command=lambda a=axis: axis_command(a, "Reset Fault", lambda: controller.reset_fault(a))).grid(row=6, column=4, padx=3, pady=4)
     ttk.Button(frame, text="Wait Motion Done", command=lambda a=axis: axis_command(a, "Wait Motion Done", lambda: controller.wait_motion_complete(a))).grid(row=6, column=5, columnspan=2, padx=3, pady=4)
+    ttk.Button(frame, text="Set Vertical Zero", command=lambda a=axis: set_vertical_zero(a)).grid(row=6, column=7, padx=3, pady=4)
 
     ttk.Button(frame, text="-1 deg", command=lambda a=axis: move_relative(a, -1.0)).grid(row=7, column=0, padx=3, pady=4)
     ttk.Button(frame, text="-0.2 deg", command=lambda a=axis: move_relative(a, -0.2)).grid(row=7, column=1, padx=3, pady=4)
     ttk.Button(frame, text="+0.2 deg", command=lambda a=axis: move_relative(a, 0.2)).grid(row=7, column=2, padx=3, pady=4)
     ttk.Button(frame, text="+1 deg", command=lambda a=axis: move_relative(a, 1.0)).grid(row=7, column=3, padx=3, pady=4)
-    ttk.Label(frame, text="Abs deg").grid(row=7, column=4, sticky="e")
-    ttk.Entry(frame, textvariable=axis_vars[axis]["abs_target"], width=10).grid(row=7, column=5, sticky="w")
-    ttk.Button(frame, text="Move Abs", command=lambda a=axis: move_absolute(a)).grid(row=7, column=6, padx=3, pady=4)
+    ttk.Button(frame, text="Home 0", command=lambda a=axis: go_home(a)).grid(row=7, column=4, padx=3, pady=4)
+    ttk.Label(frame, text="Abs deg").grid(row=7, column=5, sticky="e")
+    ttk.Entry(frame, textvariable=axis_vars[axis]["abs_target"], width=10).grid(row=7, column=6, sticky="w")
+    ttk.Button(frame, text="Move Abs", command=lambda a=axis: move_absolute(a)).grid(row=7, column=7, padx=3, pady=4)
 
 
 build_axis_frame("x", 2, 1)

@@ -31,6 +31,11 @@ DEFAULT_CHANNEL_NAME = "1"
 DEFAULT_HOST_ID = 255
 DEFAULT_BAUDRATE = 1_000_000
 
+# Hard-code these after placing each axis at vertical zero and pressing
+# "Set Vertical Zero" in the GUI.
+X_VERTICAL_ZERO_IU = 519296
+Y_VERTICAL_ZERO_IU = 0
+
 POWER_OFF = 0
 POWER_ON = 1
 UPDATE_IMMEDIATE = 1
@@ -48,6 +53,11 @@ REG_DER = 6
 REG_DER2 = 7
 
 GAIN_NAMES = ("KPP", "KIP", "KDP", "KPS", "KIS")
+
+VERTICAL_ZERO_IU = {
+    "x": X_VERTICAL_ZERO_IU,
+    "y": Y_VERTICAL_ZERO_IU,
+}
 
 
 @dataclass
@@ -266,13 +276,15 @@ class TechnosoftEx04:
         apos = self._read_long("APOS")
         cpos = self._read_long("CPOS")
         tpos = self._read_long("TPOS")
+        zero = int(VERTICAL_ZERO_IU[axis.lower()])
         return {
             "APOS": apos,
             "CPOS": cpos,
             "TPOS": tpos,
-            "APOS_deg": self.iu_to_deg(axis, apos),
-            "CPOS_deg": self.iu_to_deg(axis, cpos),
-            "TPOS_deg": self.iu_to_deg(axis, tpos),
+            "zero_iu": zero,
+            "APOS_deg": self.iu_to_deg(axis, apos - zero),
+            "CPOS_deg": self.iu_to_deg(axis, cpos - zero),
+            "TPOS_deg": self.iu_to_deg(axis, tpos - zero),
         }
 
     def read_gains(self, axis: str) -> dict[str, int]:
@@ -346,9 +358,10 @@ class TechnosoftEx04:
 
     def move_absolute_deg(self, axis: str, target_deg: float) -> None:
         info = self.select_axis(axis)
+        target_iu = self.deg_to_iu(axis, target_deg) + int(VERTICAL_ZERO_IU[axis.lower()])
         self.check(
             self.dll.TS_MoveAbsolute(
-                self.deg_to_iu(axis, target_deg),
+                target_iu,
                 info.speed_iu,
                 info.accel_iu,
                 UPDATE_IMMEDIATE,
@@ -356,6 +369,17 @@ class TechnosoftEx04:
             ),
             "TS_MoveAbsolute",
         )
+
+    def current_vertical_zero_hardcode(self, axis: str) -> dict[str, int | str]:
+        self.select_axis(axis)
+        apos = self._read_long("APOS")
+        constant_name = f"{axis.upper()}_VERTICAL_ZERO_IU"
+        return {
+            "axis": axis.lower(),
+            "apos": apos,
+            "constant_name": constant_name,
+            "code_line": f"{constant_name} = {apos}",
+        }
 
     def wait_motion_complete(self, axis: str) -> None:
         self.select_axis(axis)
