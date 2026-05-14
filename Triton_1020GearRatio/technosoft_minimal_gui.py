@@ -188,39 +188,53 @@ def set_vertical_zero(axis: str) -> None:
     axis_command(axis, "set vertical zero", action)
 
 
-def run_pvt(axis: str) -> None:
+def run_streaming_pvt(axis: str) -> None:
     def action():
-        return controller.run_pvt_line_deg(
+        return controller.run_streaming_pvt_line_deg(
             axis,
             float(axis_vars[axis]["pvt_target"].get()),
             float(axis_vars[axis]["pvt_duration"].get()),
-            int(float(axis_vars[axis]["pvt_points"].get())),
+            int(float(axis_vars[axis]["pvt_stream_points"].get())),
+            axis_vars[axis]["pvt_profile"].get(),
         )
 
-    axis_command(axis, "PVT line", action)
+    axis_command(axis, "streaming PVT", action)
+
+
+def enable_unrequested_diag(axis: str) -> None:
+    axis_command(axis, "enable callback diag", lambda: controller.enable_basic_unrequested_messages(axis))
 
 
 def open_pvt_window(axis: str) -> None:
     window = tk.Toplevel(root)
     window.title(f"{axis.upper()} Axis PVT")
-    window.geometry("420x220")
+    window.geometry("460x250")
     window.transient(root)
 
     frame = ttk.Frame(window, padding=12)
     frame.pack(fill="both", expand=True)
-    ttk.Label(frame, text=f"{axis.upper()} axis absolute PVT line move").grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(frame, text=f"{axis.upper()} axis streaming PVT line move").grid(row=0, column=0, columnspan=2, sticky="w")
     ttk.Label(frame, text="Target deg").grid(row=1, column=0, sticky="e", pady=(12, 0))
     ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_target"], width=12).grid(row=1, column=1, sticky="w", padx=6, pady=(12, 0))
     ttk.Label(frame, text="Duration s").grid(row=2, column=0, sticky="e", pady=(6, 0))
     ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_duration"], width=12).grid(row=2, column=1, sticky="w", padx=6, pady=(6, 0))
     ttk.Label(frame, text="Point count").grid(row=3, column=0, sticky="e", pady=(6, 0))
-    ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_points"], width=12).grid(row=3, column=1, sticky="w", padx=6, pady=(6, 0))
-    ttk.Button(frame, text="Run PVT", command=lambda a=axis: run_pvt(a)).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+    ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_stream_points"], width=12).grid(row=3, column=1, sticky="w", padx=6, pady=(6, 0))
+    ttk.Label(frame, text="Profile").grid(row=4, column=0, sticky="e", pady=(6, 0))
+    ttk.Combobox(
+        frame,
+        textvariable=axis_vars[axis]["pvt_profile"],
+        values=("smoothstep", "linear"),
+        state="readonly",
+        width=12,
+    ).grid(row=4, column=1, sticky="w", padx=6, pady=(6, 0))
+    ttk.Button(frame, text="Enable Callback Diag", command=lambda a=axis: enable_unrequested_diag(a)).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+    ttk.Button(frame, text="Run PVT", command=lambda a=axis: run_streaming_pvt(a)).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
     ttk.Label(
         frame,
-        text="First test suggestion: target 2 deg, duration 4 s, point count 8.",
+        text="Use 5 points/sec or less for stable fallback streaming, e.g. 4 s -> 20 points, 10 s -> 50 points. A CSV log is written for each run.",
         wraplength=360,
-    ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
 
 root = tk.Tk()
@@ -288,7 +302,8 @@ def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
         "abs_target": tk.StringVar(value="0"),
         "pvt_target": tk.StringVar(value="2"),
         "pvt_duration": tk.StringVar(value="4"),
-        "pvt_points": tk.StringVar(value="8"),
+        "pvt_stream_points": tk.StringVar(value="20"),
+        "pvt_profile": tk.StringVar(value="smoothstep"),
     }
     pos_vars[axis] = tk.StringVar(value="not connected")
     status_vars[axis] = tk.StringVar(value="")

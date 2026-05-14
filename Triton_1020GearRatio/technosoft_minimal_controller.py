@@ -18,9 +18,11 @@ and degree-to-load-internal-unit conversion.
 from __future__ import annotations
 
 import ctypes
+import csv
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -32,7 +34,14 @@ DEFAULT_CHANNEL_NAME = "1"
 DEFAULT_HOST_ID = 255
 DEFAULT_BAUDRATE = 1_000_000
 PVT_MAX_TIME_IU = 511
+PVT_MIN_FALLBACK_TIME_MS = 200
 PVT_MAX_PRELOAD_POINTS = 8
+PVT_STREAM_FEED_MARGIN_POINTS = 7
+PVT_TARGET_TOLERANCE_DEG = 0.25
+PVT_STATUS_ADDRESS = 0x0863
+SRH_SRL_ADDRESS = 0x090E
+MER_ADDRESS = 0x08FC
+PVT_LOG_DIR = Path(__file__).resolve().parent / "tracking_logs" / "technosoft_pvt_logs"
 
 # Hard-code these after placing each axis at vertical zero and pressing
 # "Set Vertical Zero" in the GUI.
@@ -97,6 +106,9 @@ class TechnosoftEx04:
         self._dll_cookie = None
         self.channel_fd: int | None = None
         self.axes: dict[str, AxisInfo] = {}
+        self._pvt_callback_type = None
+        self._pvt_callback = None
+        self._pvt_status_by_node: dict[int, dict[str, int]] = {}
 
     def load_dll(self) -> None:
         if self.dll is not None:
@@ -199,6 +211,12 @@ class TechnosoftEx04:
         d.TS_GetLoadPositionScalingFactor.restype = ctypes.c_int32
         d.TS_GetTimeScalingFactor.argtypes = [ctypes.POINTER(ctypes.c_double)]
         d.TS_GetTimeScalingFactor.restype = ctypes.c_int32
+        d.TS_RegisterHandlerForUnrequestedDriveMessages.argtypes = [ctypes.c_void_p]
+        d.TS_RegisterHandlerForUnrequestedDriveMessages.restype = None
+        d.TS_CheckForUnrequestedDriveMessages.argtypes = []
+        d.TS_CheckForUnrequestedDriveMessages.restype = ctypes.c_int32
+        d.TS_SendDataToHost.argtypes = [ctypes.c_ubyte, ctypes.c_uint32, ctypes.c_uint16]
+        d.TS_SendDataToHost.restype = ctypes.c_int32
 
     def last_error(self) -> str:
         if self.dll is None:
@@ -210,6 +228,79 @@ class TechnosoftEx04:
     def check(self, ok: int, action: str) -> None:
         if not ok:
             raise RuntimeError(f"{action} failed: {self.last_error()}")
+
+    def _register_pvt_handler(self) -> None:
+        if self._pvt_callback is not None:
+            return
+
+        callback_type = ctypes.WINFUNCTYPE(None, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int32)
+
+        def handle_message(node_id: int, address: int, value: int) -> None:
+            status = self._pvt_status_by_node.setdefault(
+                int(node_id),
+                {
+                    "buffer_full": 0,
+                    "buffer_empty": 0,
+                    "buffer_initialise": 0,
+                    "counter_dsp": 0,
+                    "raw_messages": 0,
+                    "messages": 0,
+                    "last_axis": 0,
+                    "last_address": 0,
+                    "last_value": 0,
+                },
+            )
+            status["raw_messages"] += 1
+            status["last_axis"] = int(node_id)
+            status["last_address"] = int(address)
+            status["last_value"] = int(value)
+            if int(address) != PVT_STATUS_ADDRESS:
+                return
+            status["messages"] += 1
+            status["buffer_full"] = 1 if value & (1 << 13) else 0
+            if value & (1 << 15):
+                status["buffer_empty"] = 1
+            if status["buffer_full"]:
+                status["counter_dsp"] = value & 0x3F
+            if not status["buffer_initialise"] and status["buffer_full"]:
+                status["buffer_initialise"] = 1
+                status["buffer_empty"] = 0
+
+        self._pvt_callback_type = callback_type
+        self._pvt_callback = callback_type(handle_message)
+        self.dll.TS_RegisterHandlerForUnrequestedDriveMessages.argtypes = [callback_type]
+        self.dll.TS_RegisterHandlerForUnrequestedDriveMessages(self._pvt_callback)
+
+    def _reset_pvt_status(self, node_id: int) -> dict[str, int]:
+        status = {
+            "buffer_full": 0,
+            "buffer_empty": 0,
+            "buffer_initialise": 0,
+            "counter_dsp": 0,
+            "raw_messages": 0,
+            "messages": 0,
+            "last_axis": 0,
+            "last_address": 0,
+            "last_value": 0,
+        }
+        self._pvt_status_by_node[int(node_id)] = status
+        return status
+
+    def enable_basic_unrequested_messages(self, axis: str) -> dict[str, int]:
+        """Ask the drive to send SRH/SRL and MER unrequested messages.
+
+        This is a diagnostic based on Technosoft Ex02. It lets us verify whether
+        callbacks work at all on the current channel before blaming PVT status.
+        """
+        info = self.select_axis(axis)
+        self._register_pvt_handler()
+        status = self._pvt_status_by_node.setdefault(info.config.node_id, {})
+        status.update({"raw_messages": 0, "last_axis": 0, "last_address": 0, "last_value": 0})
+        self.check(
+            self.dll.TS_SendDataToHost(DEFAULT_HOST_ID, 0x00000400, 0xFFFF),
+            "TS_SendDataToHost",
+        )
+        return {"node_id": info.config.node_id, "host_id": DEFAULT_HOST_ID}
 
     def open_channel(
         self,
@@ -389,6 +480,41 @@ class TechnosoftEx04:
         output_rev_s = info.config.output_sign * float(velocity_deg_s) / 360.0
         return output_rev_s * info.load_scale * dt
 
+    def velocity_iu_to_deg_s(self, axis: str, velocity_iu: float) -> float:
+        info = self.axes[axis.lower()]
+        dt = info.time_scale_ms / 1000.0
+        if info.load_scale == 0 or dt == 0 or info.config.output_sign == 0:
+            return 0.0
+        return float(velocity_iu) / (info.load_scale * dt) * 360.0 / info.config.output_sign
+
+    def _build_pvt_line_points(
+        self,
+        axis: str,
+        start_iu: int,
+        target_iu: int,
+        duration_s: float,
+        point_count: int,
+        profile: str,
+    ) -> list[tuple[int, float]]:
+        profile = profile.lower()
+        if profile not in {"linear", "smoothstep"}:
+            raise ValueError("PVT profile must be 'linear' or 'smoothstep'")
+        delta_iu = target_iu - start_iu
+        points = []
+        for i in range(1, point_count + 1):
+            u = i / point_count
+            if profile == "smoothstep":
+                pos_scale = 3.0 * u * u - 2.0 * u * u * u
+                vel_scale = 6.0 * u * (1.0 - u)
+            else:
+                pos_scale = u
+                vel_scale = 1.0
+            pos_iu = int(round(start_iu + delta_iu * pos_scale))
+            vel_iu_per_s = delta_iu * vel_scale / duration_s
+            velocity_deg_s = self.iu_to_deg(axis, vel_iu_per_s)
+            points.append((pos_iu, self.velocity_deg_s_to_iu(axis, velocity_deg_s)))
+        return points
+
     def move_relative_deg(self, axis: str, delta_deg: float) -> None:
         """Vendor Ex04_Trapezoidal TS_MoveRelative using project degree conversion."""
         info = self.select_axis(axis)
@@ -516,6 +642,200 @@ class TechnosoftEx04:
             "trace_first": trace[:3],
             "trace_last": trace[-3:],
         }
+
+    def run_streaming_pvt_line_deg(
+        self,
+        axis: str,
+        target_deg: float,
+        duration_s: float,
+        point_count: int,
+        profile: str = "smoothstep",
+    ) -> dict[str, float | int | str]:
+        """Stream a generated line trajectory using the Ex08 PVT buffer handshake."""
+        if duration_s <= 0:
+            raise ValueError("PVT duration must be positive")
+        if point_count < 4:
+            raise ValueError("Streaming PVT point count must be at least 4")
+
+        info = self.select_axis(axis)
+        self._register_pvt_handler()
+        status = self._reset_pvt_status(info.config.node_id)
+        self.check(
+            self.dll.TS_SendDataToHost(DEFAULT_HOST_ID, 0x00000400, 0xFFFF),
+            "TS_SendDataToHost",
+        )
+        self.check(self.dll.TS_Stop(), "TS_Stop")
+        self.check(self.dll.TS_SetTargetPositionToActual(), "TS_SetTargetPositionToActual")
+
+        start_pos = self.read_positions(axis)
+        start_iu = int(start_pos["TPOS"])
+        start_deg = self.iu_to_deg(axis, start_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+        target_iu = self.absolute_deg_to_iu(axis, target_deg)
+        segment_time_ms = duration_s * 1000.0 / point_count
+        segment_time_iu = int(round(segment_time_ms / info.time_scale_ms))
+        if segment_time_iu <= 0 or segment_time_iu > PVT_MAX_TIME_IU:
+            min_points = int(duration_s * 1000.0 / (PVT_MAX_TIME_IU * info.time_scale_ms)) + 1
+            raise ValueError(
+                f"PVT segment time must be 1..{PVT_MAX_TIME_IU}; got {segment_time_iu}. "
+                f"Increase Point count to at least {min_points} for {duration_s:g} s."
+            )
+        if segment_time_ms < PVT_MIN_FALLBACK_TIME_MS:
+            max_points = max(1, int(duration_s * 1000.0 / PVT_MIN_FALLBACK_TIME_MS))
+            raise ValueError(
+                f"Fallback streaming is not stable below {PVT_MIN_FALLBACK_TIME_MS:g} ms per point; "
+                f"got {segment_time_ms:g} ms. Reduce Point count to {max_points} or less for {duration_s:g} s."
+            )
+        segment_s = segment_time_iu * info.time_scale_ms / 1000.0
+
+        points = self._build_pvt_line_points(axis, start_iu, target_iu, duration_s, point_count, profile)
+        log_path = self._new_pvt_log_path(axis)
+        samples_written = 0
+        points_sent = 1
+        counter = 0
+        stream_index = 1
+
+        self.check(self.dll.TS_GOTO(0x4000), "TS_GOTO(0x4000)")
+        self.check(self.dll.TS_PVTSetup(1, 1, 1, 1, 1, 1, 1), "TS_PVTSetup")
+        first_pos, first_vel = points[0]
+        self.check(
+            self.dll.TS_SendPVTFirstPoint(
+                first_pos,
+                first_vel,
+                segment_time_iu,
+                counter,
+                ABSOLUTE_POSITION,
+                0,
+                UPDATE_NONE,
+                FROM_REFERENCE,
+            ),
+            "TS_SendPVTFirstPoint",
+        )
+        initial_preload = min(PVT_MAX_PRELOAD_POINTS, len(points))
+        while stream_index < initial_preload:
+            counter = (counter + 1) & 0x3F
+            pos_iu, vel_iu = points[stream_index]
+            self.check(
+                self.dll.TS_SendPVTPoint(pos_iu, vel_iu, segment_time_iu, counter),
+                "TS_SendPVTPoint",
+            )
+            stream_index += 1
+            points_sent += 1
+        self.check(self.dll.TS_UpdateImmediate(), "TS_UpdateImmediate")
+
+        t0 = time.monotonic()
+        next_sample = t0
+        sample_period_s = max(0.05, min(0.2, segment_s / 2.0))
+        deadline = t0 + duration_s + 3.0
+        update_sent = True
+        with log_path.open("w", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=[
+                    "t_s",
+                    "target_deg",
+                    "target_velocity_deg_s",
+                    "APOS_deg",
+                    "CPOS_deg",
+                    "TPOS_deg",
+                    "points_sent",
+                    "buffer_full",
+                    "buffer_empty",
+                    "buffer_initialise",
+                    "raw_messages",
+                    "messages",
+                    "last_address",
+                    "last_value",
+                ],
+            )
+            writer.writeheader()
+            while True:
+                self.check(self.dll.TS_CheckForUnrequestedDriveMessages(), "TS_CheckForUnrequestedDriveMessages")
+
+                now = time.monotonic()
+                elapsed = now - t0
+                if status["buffer_empty"]:
+                    if stream_index >= len(points) and elapsed >= duration_s - segment_s:
+                        break
+                    raise RuntimeError("PVT buffer empty before all points were streamed")
+
+                if status["messages"]:
+                    should_send = not status["buffer_full"]
+                else:
+                    next_point_needed_at = max(0.0, (points_sent - PVT_STREAM_FEED_MARGIN_POINTS) * segment_s)
+                    should_send = elapsed >= next_point_needed_at
+
+                if should_send and stream_index < len(points):
+                    counter = (counter + 1) & 0x3F
+                    pos_iu, vel_iu = points[stream_index]
+                    self.check(
+                        self.dll.TS_SendPVTPoint(pos_iu, vel_iu, segment_time_iu, counter),
+                        "TS_SendPVTPoint",
+                    )
+                    stream_index += 1
+                    points_sent += 1
+
+                if now >= next_sample:
+                    pos = self.read_positions(axis)
+                    expected_index = min(int(elapsed / (duration_s / point_count)), len(points) - 1)
+                    expected_pos_iu, expected_vel_iu = points[expected_index]
+                    writer.writerow(
+                        {
+                            "t_s": f"{elapsed:.4f}",
+                            "target_deg": f"{self.iu_to_deg(axis, expected_pos_iu - int(VERTICAL_ZERO_IU[axis.lower()])):.6f}",
+                            "target_velocity_deg_s": f"{self.velocity_iu_to_deg_s(axis, expected_vel_iu):.6f}",
+                            "APOS_deg": f"{float(pos['APOS_deg']):.6f}",
+                            "CPOS_deg": f"{float(pos['CPOS_deg']):.6f}",
+                            "TPOS_deg": f"{float(pos['TPOS_deg']):.6f}",
+                            "points_sent": points_sent,
+                            "buffer_full": status["buffer_full"],
+                            "buffer_empty": status["buffer_empty"],
+                            "buffer_initialise": status["buffer_initialise"],
+                            "raw_messages": status["raw_messages"],
+                            "messages": status["messages"],
+                            "last_address": f"0x{status['last_address']:04X}",
+                            "last_value": status["last_value"],
+                        }
+                    )
+                    samples_written += 1
+                    next_sample += sample_period_s
+
+                if points_sent >= len(points) and now - t0 >= duration_s + 0.5:
+                    break
+                if now > deadline:
+                    raise RuntimeError("Streaming PVT timed out")
+                time.sleep(0.002)
+
+        end_pos = self.read_positions(axis)
+        final_command_error_deg = float(end_pos["TPOS_deg"]) - float(target_deg)
+        if abs(final_command_error_deg) > PVT_TARGET_TOLERANCE_DEG:
+            raise RuntimeError(
+                f"Streaming PVT did not reach target reference: TPOS error {final_command_error_deg:.3f} deg. "
+                f"Log: {log_path}"
+            )
+        return {
+            "start_deg": start_deg,
+            "target_deg": float(target_deg),
+            "delta_deg": float(target_deg - start_deg),
+            "duration_s": float(duration_s),
+            "point_count": int(point_count),
+            "profile": profile,
+            "segment_time_iu": segment_time_iu,
+            "points_sent": points_sent,
+            "update_sent": int(update_sent),
+            "raw_messages": status["raw_messages"],
+            "pvt_messages": status["messages"],
+            "last_message_address": f"0x{status['last_address']:04X}",
+            "end_APOS_deg": float(end_pos["APOS_deg"]),
+            "end_TPOS_deg": float(end_pos["TPOS_deg"]),
+            "final_TPOS_error_deg": final_command_error_deg,
+            "samples_written": samples_written,
+            "log_path": str(log_path),
+        }
+
+    def _new_pvt_log_path(self, axis: str) -> Path:
+        PVT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return PVT_LOG_DIR / f"technosoft_pvt_{axis.lower()}_{stamp}.csv"
 
     def current_vertical_zero_hardcode(self, axis: str) -> dict[str, int | str]:
         self.select_axis(axis)
