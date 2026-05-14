@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import csv
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -652,11 +653,100 @@ class TechnosoftEx04:
         profile: str = "smoothstep",
     ) -> dict[str, float | int | str]:
         """Stream a generated line trajectory using the Ex08 PVT buffer handshake."""
-        if duration_s <= 0:
-            raise ValueError("PVT duration must be positive")
-        if point_count < 4:
-            raise ValueError("Streaming PVT point count must be at least 4")
+        info, status, start_pos = self._prepare_pvt_stream(axis)
+        start_iu = int(start_pos["TPOS"])
+        start_deg = self.iu_to_deg(axis, start_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+        target_iu = self.absolute_deg_to_iu(axis, target_deg)
+        segment_time_iu, _segment_s = self._pvt_segment_timing(info, duration_s, point_count)
+        points = self._build_pvt_line_points(axis, start_iu, target_iu, duration_s, point_count, profile)
+        metadata: dict[str, float | int | str] = {
+            "trajectory": "line",
+            "start_deg": start_deg,
+            "target_deg": float(target_deg),
+            "delta_deg": float(target_deg - start_deg),
+            "duration_s": float(duration_s),
+            "point_count": int(point_count),
+            "profile": profile,
+            "target_iu": int(target_iu),
+        }
+        return self._stream_pvt_points(
+            axis,
+            info,
+            status,
+            points,
+            duration_s,
+            segment_time_iu,
+            final_target_deg=float(target_deg),
+            metadata=metadata,
+        )
 
+    def run_streaming_pvt_sine_deg(
+        self,
+        axis: str,
+        center_deg: float,
+        amplitude_deg: float,
+        period_s: float,
+        duration_s: float,
+        point_count: int,
+    ) -> dict[str, float | int | str]:
+        """Stream a sine trajectory using absolute PVT points.
+
+        The sine phase is chosen from the current TPOS, so the first generated
+        trajectory is continuous with the present axis position instead of
+        jumping to a fixed phase. This is the same seam that later satellite
+        position/velocity points should feed.
+        """
+        if amplitude_deg <= 0:
+            raise ValueError("Sine amplitude must be positive")
+        if period_s <= 0:
+            raise ValueError("Sine period must be positive")
+
+        info, status, start_pos = self._prepare_pvt_stream(axis)
+        start_iu = int(start_pos["TPOS"])
+        start_deg = self.iu_to_deg(axis, start_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+        offset_ratio = (float(start_deg) - float(center_deg)) / float(amplitude_deg)
+        if abs(offset_ratio) > 1.0:
+            raise ValueError(
+                f"Current position {start_deg:.3f} deg is outside sine range "
+                f"[{center_deg - amplitude_deg:.3f}, {center_deg + amplitude_deg:.3f}] deg. "
+                "Move inside the range first to avoid an initial PVT jump."
+            )
+
+        segment_time_iu, segment_s = self._pvt_segment_timing(info, duration_s, point_count)
+        phase0 = math.asin(max(-1.0, min(1.0, offset_ratio)))
+        omega = 2.0 * math.pi / float(period_s)
+        points: list[tuple[int, float]] = []
+        for i in range(1, point_count + 1):
+            t_s = i * segment_s
+            phase = phase0 + omega * t_s
+            pos_deg = float(center_deg) + float(amplitude_deg) * math.sin(phase)
+            vel_deg_s = float(amplitude_deg) * omega * math.cos(phase)
+            points.append((self.absolute_deg_to_iu(axis, pos_deg), self.velocity_deg_s_to_iu(axis, vel_deg_s)))
+
+        final_target_deg = self.iu_to_deg(axis, points[-1][0] - int(VERTICAL_ZERO_IU[axis.lower()]))
+        metadata = {
+            "trajectory": "sine",
+            "start_deg": start_deg,
+            "center_deg": float(center_deg),
+            "amplitude_deg": float(amplitude_deg),
+            "period_s": float(period_s),
+            "duration_s": float(duration_s),
+            "point_count": int(point_count),
+            "profile": "sine",
+            "final_target_deg": float(final_target_deg),
+        }
+        return self._stream_pvt_points(
+            axis,
+            info,
+            status,
+            points,
+            duration_s,
+            segment_time_iu,
+            final_target_deg=float(final_target_deg),
+            metadata=metadata,
+        )
+
+    def _prepare_pvt_stream(self, axis: str) -> tuple[AxisInfo, dict[str, int], dict[str, int | float]]:
         info = self.select_axis(axis)
         self._register_pvt_handler()
         status = self._reset_pvt_status(info.config.node_id)
@@ -666,11 +756,13 @@ class TechnosoftEx04:
         )
         self.check(self.dll.TS_Stop(), "TS_Stop")
         self.check(self.dll.TS_SetTargetPositionToActual(), "TS_SetTargetPositionToActual")
+        return info, status, self.read_positions(axis)
 
-        start_pos = self.read_positions(axis)
-        start_iu = int(start_pos["TPOS"])
-        start_deg = self.iu_to_deg(axis, start_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
-        target_iu = self.absolute_deg_to_iu(axis, target_deg)
+    def _pvt_segment_timing(self, info: AxisInfo, duration_s: float, point_count: int) -> tuple[int, float]:
+        if duration_s <= 0:
+            raise ValueError("PVT duration must be positive")
+        if point_count < 4:
+            raise ValueError("Streaming PVT point count must be at least 4")
         segment_time_ms = duration_s * 1000.0 / point_count
         segment_time_iu = int(round(segment_time_ms / info.time_scale_ms))
         if segment_time_iu <= 0 or segment_time_iu > PVT_MAX_TIME_IU:
@@ -685,9 +777,22 @@ class TechnosoftEx04:
                 f"Fallback streaming is not stable below {PVT_MIN_FALLBACK_TIME_MS:g} ms per point; "
                 f"got {segment_time_ms:g} ms. Reduce Point count to {max_points} or less for {duration_s:g} s."
             )
-        segment_s = segment_time_iu * info.time_scale_ms / 1000.0
+        return segment_time_iu, segment_time_iu * info.time_scale_ms / 1000.0
 
-        points = self._build_pvt_line_points(axis, start_iu, target_iu, duration_s, point_count, profile)
+    def _stream_pvt_points(
+        self,
+        axis: str,
+        info: AxisInfo,
+        status: dict[str, int],
+        points: list[tuple[int, float]],
+        duration_s: float,
+        segment_time_iu: int,
+        final_target_deg: float,
+        metadata: dict[str, float | int | str],
+    ) -> dict[str, float | int | str]:
+        if not points:
+            raise ValueError("PVT point list is empty")
+        segment_s = segment_time_iu * info.time_scale_ms / 1000.0
         log_path = self._new_pvt_log_path(axis)
         samples_written = 0
         points_sent = 1
@@ -776,7 +881,7 @@ class TechnosoftEx04:
 
                 if now >= next_sample:
                     pos = self.read_positions(axis)
-                    expected_index = min(int(elapsed / (duration_s / point_count)), len(points) - 1)
+                    expected_index = min(int(elapsed / segment_s), len(points) - 1)
                     expected_pos_iu, expected_vel_iu = points[expected_index]
                     writer.writerow(
                         {
@@ -806,31 +911,29 @@ class TechnosoftEx04:
                 time.sleep(0.002)
 
         end_pos = self.read_positions(axis)
-        final_command_error_deg = float(end_pos["TPOS_deg"]) - float(target_deg)
+        final_command_error_deg = float(end_pos["TPOS_deg"]) - float(final_target_deg)
         if abs(final_command_error_deg) > PVT_TARGET_TOLERANCE_DEG:
             raise RuntimeError(
                 f"Streaming PVT did not reach target reference: TPOS error {final_command_error_deg:.3f} deg. "
                 f"Log: {log_path}"
             )
-        return {
-            "start_deg": start_deg,
-            "target_deg": float(target_deg),
-            "delta_deg": float(target_deg - start_deg),
-            "duration_s": float(duration_s),
-            "point_count": int(point_count),
-            "profile": profile,
-            "segment_time_iu": segment_time_iu,
-            "points_sent": points_sent,
-            "update_sent": int(update_sent),
-            "raw_messages": status["raw_messages"],
-            "pvt_messages": status["messages"],
-            "last_message_address": f"0x{status['last_address']:04X}",
-            "end_APOS_deg": float(end_pos["APOS_deg"]),
-            "end_TPOS_deg": float(end_pos["TPOS_deg"]),
-            "final_TPOS_error_deg": final_command_error_deg,
-            "samples_written": samples_written,
-            "log_path": str(log_path),
-        }
+        result = dict(metadata)
+        result.update(
+            {
+                "segment_time_iu": segment_time_iu,
+                "points_sent": points_sent,
+                "update_sent": int(update_sent),
+                "raw_messages": status["raw_messages"],
+                "pvt_messages": status["messages"],
+                "last_message_address": f"0x{status['last_address']:04X}",
+                "end_APOS_deg": float(end_pos["APOS_deg"]),
+                "end_TPOS_deg": float(end_pos["TPOS_deg"]),
+                "final_TPOS_error_deg": final_command_error_deg,
+                "samples_written": samples_written,
+                "log_path": str(log_path),
+            }
+        )
+        return result
 
     def _new_pvt_log_path(self, axis: str) -> Path:
         PVT_LOG_DIR.mkdir(parents=True, exist_ok=True)
