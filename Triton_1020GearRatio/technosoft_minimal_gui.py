@@ -188,6 +188,41 @@ def set_vertical_zero(axis: str) -> None:
     axis_command(axis, "set vertical zero", action)
 
 
+def run_pvt(axis: str) -> None:
+    def action():
+        return controller.run_pvt_line_deg(
+            axis,
+            float(axis_vars[axis]["pvt_target"].get()),
+            float(axis_vars[axis]["pvt_duration"].get()),
+            int(float(axis_vars[axis]["pvt_points"].get())),
+        )
+
+    axis_command(axis, "PVT line", action)
+
+
+def open_pvt_window(axis: str) -> None:
+    window = tk.Toplevel(root)
+    window.title(f"{axis.upper()} Axis PVT")
+    window.geometry("420x220")
+    window.transient(root)
+
+    frame = ttk.Frame(window, padding=12)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=f"{axis.upper()} axis absolute PVT line move").grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(frame, text="Target deg").grid(row=1, column=0, sticky="e", pady=(12, 0))
+    ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_target"], width=12).grid(row=1, column=1, sticky="w", padx=6, pady=(12, 0))
+    ttk.Label(frame, text="Duration s").grid(row=2, column=0, sticky="e", pady=(6, 0))
+    ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_duration"], width=12).grid(row=2, column=1, sticky="w", padx=6, pady=(6, 0))
+    ttk.Label(frame, text="Point count").grid(row=3, column=0, sticky="e", pady=(6, 0))
+    ttk.Entry(frame, textvariable=axis_vars[axis]["pvt_points"], width=12).grid(row=3, column=1, sticky="w", padx=6, pady=(6, 0))
+    ttk.Button(frame, text="Run PVT", command=lambda a=axis: run_pvt(a)).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+    ttk.Label(
+        frame,
+        text="First test suggestion: target 2 deg, duration 4 s, point count 8.",
+        wraplength=360,
+    ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+
 root = tk.Tk()
 root.title("Technosoft Ex04 BasicMove Python Port")
 root.geometry("1180x760")
@@ -251,6 +286,9 @@ def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
         "setup": tk.StringVar(value=str(DEFAULT_SETUP_PATH)),
         "sign": tk.StringVar(value="1"),
         "abs_target": tk.StringVar(value="0"),
+        "pvt_target": tk.StringVar(value="2"),
+        "pvt_duration": tk.StringVar(value="4"),
+        "pvt_points": tk.StringVar(value="8"),
     }
     pos_vars[axis] = tk.StringVar(value="not connected")
     status_vars[axis] = tk.StringVar(value="")
@@ -296,11 +334,20 @@ def build_axis_frame(axis: str, row: int, default_node_id: int) -> None:
 
     safety_frame = ttk.LabelFrame(frame, text="Safety / Utilities", padding=6, style="AxisInner.TLabelframe")
     safety_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-    ttk.Button(safety_frame, text="Stop", command=lambda a=axis: axis_command(a, "Stop", lambda: controller.stop(a))).grid(row=0, column=0, padx=3, pady=3)
-    ttk.Button(safety_frame, text="Power Off", command=lambda a=axis: axis_command(a, "Power Off", lambda: controller.power(a, False))).grid(row=0, column=1, padx=3, pady=3)
-    ttk.Button(safety_frame, text="Reset Fault", command=lambda a=axis: axis_command(a, "Reset Fault", lambda: controller.reset_fault(a))).grid(row=0, column=2, padx=3, pady=3)
-    ttk.Button(safety_frame, text="Wait Motion Done", command=lambda a=axis: axis_command(a, "Wait Motion Done", lambda: controller.wait_motion_complete(a))).grid(row=0, column=3, padx=3, pady=3)
-    ttk.Button(safety_frame, text="Set Vertical Zero", command=lambda a=axis: set_vertical_zero(a)).grid(row=0, column=4, padx=3, pady=3)
+    safety_frame.columnconfigure(0, weight=1)
+    safety_frame.columnconfigure(1, weight=1)
+
+    safety_left = ttk.Frame(safety_frame)
+    safety_left.grid(row=0, column=0, sticky="w")
+    ttk.Button(safety_left, text="Stop", command=lambda a=axis: axis_command(a, "Stop", lambda: controller.stop(a))).grid(row=0, column=0, padx=3, pady=3)
+    ttk.Button(safety_left, text="Power Off", command=lambda a=axis: axis_command(a, "Power Off", lambda: controller.power(a, False))).grid(row=0, column=1, padx=3, pady=3)
+    ttk.Button(safety_left, text="Reset Fault", command=lambda a=axis: axis_command(a, "Reset Fault", lambda: controller.reset_fault(a))).grid(row=0, column=2, padx=3, pady=3)
+    ttk.Button(safety_left, text="Wait Motion Done", command=lambda a=axis: axis_command(a, "Wait Motion Done", lambda: controller.wait_motion_complete(a))).grid(row=0, column=3, padx=3, pady=3)
+    ttk.Button(safety_left, text="Set Vertical Zero", command=lambda a=axis: set_vertical_zero(a)).grid(row=0, column=4, padx=3, pady=3)
+
+    safety_right = ttk.Frame(safety_frame)
+    safety_right.grid(row=0, column=1, sticky="e")
+    ttk.Button(safety_right, text="PVT", command=lambda a=axis: open_pvt_window(a)).grid(row=0, column=0, padx=3, pady=3)
 
 
 build_axis_frame("x", 2, 1)

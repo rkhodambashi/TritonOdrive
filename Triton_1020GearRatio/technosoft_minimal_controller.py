@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,8 @@ CHANNEL_PEAK_SYS_PCAN_USB = 7
 DEFAULT_CHANNEL_NAME = "1"
 DEFAULT_HOST_ID = 255
 DEFAULT_BAUDRATE = 1_000_000
+PVT_MAX_TIME_IU = 511
+PVT_MAX_PRELOAD_POINTS = 8
 
 # Hard-code these after placing each axis at vertical zero and pressing
 # "Set Vertical Zero" in the GUI.
@@ -38,9 +41,11 @@ Y_VERTICAL_ZERO_IU = 0
 
 POWER_OFF = 0
 POWER_ON = 1
+UPDATE_NONE = -1
 UPDATE_IMMEDIATE = 1
 FROM_MEASURE = 0
 FROM_REFERENCE = 1
+ABSOLUTE_POSITION = 0
 NO_ADDITIVE = 0
 WAIT_EVENT = 1
 NO_STOP = 0
@@ -152,8 +157,42 @@ class TechnosoftEx04:
             ctypes.c_int16,
         ]
         d.TS_MoveAbsolute.restype = ctypes.c_int32
+        d.TS_UpdateImmediate.argtypes = []
+        d.TS_UpdateImmediate.restype = ctypes.c_int32
+        d.TS_GOTO.argtypes = [ctypes.c_uint16]
+        d.TS_GOTO.restype = ctypes.c_int32
+        d.TS_PVTSetup.argtypes = [
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+        ]
+        d.TS_PVTSetup.restype = ctypes.c_int32
+        d.TS_SendPVTFirstPoint.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_double,
+            ctypes.c_uint16,
+            ctypes.c_int16,
+            ctypes.c_int16,
+            ctypes.c_int32,
+            ctypes.c_int16,
+            ctypes.c_int16,
+        ]
+        d.TS_SendPVTFirstPoint.restype = ctypes.c_int32
+        d.TS_SendPVTPoint.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_double,
+            ctypes.c_uint16,
+            ctypes.c_int16,
+        ]
+        d.TS_SendPVTPoint.restype = ctypes.c_int32
         d.TS_SetEventOnMotionComplete.argtypes = [ctypes.c_int32, ctypes.c_int32]
         d.TS_SetEventOnMotionComplete.restype = ctypes.c_int32
+        d.TS_SetTargetPositionToActual.argtypes = []
+        d.TS_SetTargetPositionToActual.restype = ctypes.c_int32
         d.TS_GetMotorPositionScalingFactor.argtypes = [ctypes.POINTER(ctypes.c_double)]
         d.TS_GetMotorPositionScalingFactor.restype = ctypes.c_int32
         d.TS_GetLoadPositionScalingFactor.argtypes = [ctypes.POINTER(ctypes.c_double)]
@@ -323,6 +362,9 @@ class TechnosoftEx04:
         info = self.axes[axis.lower()]
         return int(round(info.config.output_sign * float(deg) / 360.0 * info.load_scale))
 
+    def absolute_deg_to_iu(self, axis: str, deg: float) -> int:
+        return self.deg_to_iu(axis, deg) + int(VERTICAL_ZERO_IU[axis.lower()])
+
     def iu_to_deg(self, axis: str, iu: int | float) -> float:
         info = self.axes[axis.lower()]
         if info.load_scale == 0:
@@ -341,6 +383,12 @@ class TechnosoftEx04:
         output_rev_s2 = abs(float(accel_deg_s2)) / 360.0
         return output_rev_s2 * info.load_scale * dt * dt
 
+    def velocity_deg_s_to_iu(self, axis: str, velocity_deg_s: float) -> float:
+        info = self.axes[axis.lower()]
+        dt = info.time_scale_ms / 1000.0
+        output_rev_s = info.config.output_sign * float(velocity_deg_s) / 360.0
+        return output_rev_s * info.load_scale * dt
+
     def move_relative_deg(self, axis: str, delta_deg: float) -> None:
         """Vendor Ex04_Trapezoidal TS_MoveRelative using project degree conversion."""
         info = self.select_axis(axis)
@@ -358,7 +406,7 @@ class TechnosoftEx04:
 
     def move_absolute_deg(self, axis: str, target_deg: float) -> None:
         info = self.select_axis(axis)
-        target_iu = self.deg_to_iu(axis, target_deg) + int(VERTICAL_ZERO_IU[axis.lower()])
+        target_iu = self.absolute_deg_to_iu(axis, target_deg)
         self.check(
             self.dll.TS_MoveAbsolute(
                 target_iu,
@@ -369,6 +417,105 @@ class TechnosoftEx04:
             ),
             "TS_MoveAbsolute",
         )
+
+    def run_pvt_line_deg(self, axis: str, target_deg: float, duration_s: float, point_count: int) -> dict[str, float | int | list]:
+        """Send a short absolute PVT line move.
+
+        This deliberately preloads a small point set instead of implementing the
+        full Ex08 streaming callback. It is meant to prove that the drive accepts
+        PVT points before we build the continuous satellite-tracking streamer.
+        """
+        if duration_s <= 0:
+            raise ValueError("PVT duration must be positive")
+        if point_count < 2:
+            raise ValueError("PVT point count must be at least 2")
+        if point_count > PVT_MAX_PRELOAD_POINTS:
+            raise ValueError(
+                f"This non-streaming PVT proof test can preload at most {PVT_MAX_PRELOAD_POINTS} points. "
+                "Longer trajectories need the streaming PVT buffer handshake."
+            )
+
+        info = self.select_axis(axis)
+        self.check(self.dll.TS_Stop(), "TS_Stop")
+        self.check(self.dll.TS_SetTargetPositionToActual(), "TS_SetTargetPositionToActual")
+        start_pos = self.read_positions(axis)
+        start_iu = int(start_pos["TPOS"])
+        start_deg = self.iu_to_deg(axis, start_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+        target_iu = self.absolute_deg_to_iu(axis, target_deg)
+        segment_count = point_count
+        segment_time_ms = duration_s * 1000.0 / segment_count
+        segment_time_iu = int(round(segment_time_ms / info.time_scale_ms))
+        if segment_time_iu <= 0 or segment_time_iu > PVT_MAX_TIME_IU:
+            min_points = int(duration_s * 1000.0 / (PVT_MAX_TIME_IU * info.time_scale_ms)) + 1
+            raise ValueError(
+                f"PVT segment time must be 1..{PVT_MAX_TIME_IU}; got {segment_time_iu}. "
+                f"Increase Point count to at least {min_points} for {duration_s:g} s."
+            )
+
+        velocity_deg_s = (target_deg - start_deg) / duration_s
+        velocity_iu = self.velocity_deg_s_to_iu(axis, velocity_deg_s)
+        points = [
+            int(round(start_iu + (target_iu - start_iu) * i / segment_count))
+            for i in range(1, segment_count + 1)
+        ]
+
+        self.check(self.dll.TS_GOTO(0x4000), "TS_GOTO(0x4000)")
+        self.check(self.dll.TS_PVTSetup(1, 1, 1, 1, 1, 1, 1), "TS_PVTSetup")
+        self.check(
+            self.dll.TS_SendPVTFirstPoint(
+                points[0],
+                velocity_iu,
+                segment_time_iu,
+                0,
+                ABSOLUTE_POSITION,
+                0,
+                UPDATE_NONE,
+                FROM_REFERENCE,
+            ),
+            "TS_SendPVTFirstPoint",
+        )
+        for counter, point in enumerate(points[1:], start=1):
+            self.check(
+                self.dll.TS_SendPVTPoint(point, velocity_iu, segment_time_iu, counter & 0x3F),
+                "TS_SendPVTPoint",
+            )
+        self.check(self.dll.TS_UpdateImmediate(), "TS_UpdateImmediate")
+        trace = []
+        t0 = time.monotonic()
+        next_sample = t0
+        while True:
+            now = time.monotonic()
+            if now >= next_sample:
+                pos = self.read_positions(axis)
+                trace.append(
+                    {
+                        "t_s": round(now - t0, 3),
+                        "APOS_deg": round(float(pos["APOS_deg"]), 6),
+                        "CPOS_deg": round(float(pos["CPOS_deg"]), 6),
+                        "TPOS_deg": round(float(pos["TPOS_deg"]), 6),
+                    }
+                )
+                next_sample += 0.25
+            if now - t0 >= duration_s + 0.5:
+                break
+            time.sleep(0.01)
+        end_pos = self.read_positions(axis)
+        return {
+            "start_deg": start_deg,
+            "target_deg": float(target_deg),
+            "delta_deg": float(target_deg - start_deg),
+            "duration_s": float(duration_s),
+            "point_count": int(point_count),
+            "segment_time_iu": segment_time_iu,
+            "velocity_iu": velocity_iu,
+            "start_APOS": int(start_pos["APOS"]),
+            "start_TPOS": int(start_pos["TPOS"]),
+            "target_iu": int(target_iu),
+            "end_APOS_deg": float(end_pos["APOS_deg"]),
+            "end_TPOS_deg": float(end_pos["TPOS_deg"]),
+            "trace_first": trace[:3],
+            "trace_last": trace[-3:],
+        }
 
     def current_vertical_zero_hardcode(self, axis: str) -> dict[str, int | str]:
         self.select_axis(axis)
