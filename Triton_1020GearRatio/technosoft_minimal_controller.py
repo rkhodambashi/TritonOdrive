@@ -633,6 +633,60 @@ class TechnosoftEx04:
             "TS_MoveAbsolute(home)",
         )
 
+    def home_absolute_deg_checked(
+        self,
+        axis: str,
+        target_deg: float = 0.0,
+        timeout_s: float | None = None,
+        tolerance_deg: float = 0.25,
+        following_error_deg: float = 5.0,
+    ) -> dict[str, float | int]:
+        """Home from measured position and verify the axis actually settles."""
+        self.home_absolute_deg(axis, target_deg)
+        start_pos = self.read_positions(axis)
+        info = self.axes[axis.lower()]
+        distance_deg = abs(float(target_deg) - float(start_pos["APOS_deg"]))
+        if timeout_s is None:
+            speed_deg_s = max(0.05, abs(float(info.speed_deg_s)))
+            accel_deg_s2 = max(0.05, abs(float(info.accel_deg_s2)))
+            timeout_s = distance_deg / speed_deg_s + 2.0 * speed_deg_s / accel_deg_s2 + 10.0
+        deadline = time.monotonic() + max(0.1, timeout_s)
+        progress_check_at = time.monotonic() + 5.0
+        start_apos_deg = float(start_pos["APOS_deg"])
+        start_tpos_deg = float(start_pos["TPOS_deg"])
+        last_pos = start_pos
+        while time.monotonic() < deadline:
+            pos = self.read_positions(axis)
+            last_pos = pos
+            apos_tpos_error = float(pos["APOS_deg"]) - float(pos["TPOS_deg"])
+            target_error = float(pos["APOS_deg"]) - float(target_deg)
+            if time.monotonic() >= progress_check_at and abs(target_error) > tolerance_deg:
+                apos_progress = abs(float(pos["APOS_deg"]) - start_apos_deg)
+                tpos_progress = abs(float(pos["TPOS_deg"]) - start_tpos_deg)
+                if apos_progress < 0.05 and tpos_progress < 0.05:
+                    raise RuntimeError(
+                        f"{axis.upper()} home did not start moving: "
+                        f"APOS progress={apos_progress:.3f} deg, TPOS progress={tpos_progress:.3f} deg, "
+                        f"target={float(target_deg):.3f} deg"
+                    )
+                progress_check_at = time.monotonic() + 5.0
+            if abs(apos_tpos_error) > following_error_deg:
+                raise RuntimeError(
+                    f"{axis.upper()} actual position is not following home reference: "
+                    f"APOS-TPOS={apos_tpos_error:.3f} deg"
+                )
+            if abs(target_error) <= tolerance_deg and abs(apos_tpos_error) <= tolerance_deg:
+                return pos
+            time.sleep(0.05)
+        apos_tpos_error = float(last_pos["APOS_deg"]) - float(last_pos["TPOS_deg"])
+        target_error = float(last_pos["APOS_deg"]) - float(target_deg)
+        raise RuntimeError(
+            f"{axis.upper()} home did not settle: APOS={float(last_pos['APOS_deg']):.3f} deg, "
+            f"TPOS={float(last_pos['TPOS_deg']):.3f} deg, target={float(target_deg):.3f} deg, "
+            f"APOS-target={target_error:.3f} deg, APOS-TPOS={apos_tpos_error:.3f} deg, "
+            f"timeout={timeout_s:.1f}s"
+        )
+
     def recover_and_home_absolute_deg(self, axis: str, target_deg: float = 0.0) -> None:
         """Recover from PVT/reference mode before commanding Home."""
         info = self.select_axis(axis)
@@ -1014,6 +1068,7 @@ class TechnosoftEx04:
         metadata: dict[str, float | int | str] | None = None,
         stop_requested=None,
         ui_pump=None,
+        sample_callback=None,
     ) -> dict[str, float | int | str]:
         """Stream arbitrary absolute PVT points on one axis.
 
@@ -1056,6 +1111,7 @@ class TechnosoftEx04:
             metadata=base_metadata,
             stop_requested=stop_requested,
             ui_pump=ui_pump,
+            sample_callback=sample_callback,
         )
 
     def _prepare_pvt_stream(self, axis: str) -> tuple[AxisInfo, dict[str, int], dict[str, int | float]]:
@@ -1146,6 +1202,7 @@ class TechnosoftEx04:
         metadata: dict[str, float | int | str],
         stop_requested=None,
         ui_pump=None,
+        sample_callback=None,
     ) -> dict[str, float | int | str]:
         if not points:
             raise ValueError("PVT point list is empty")
@@ -1255,13 +1312,36 @@ class TechnosoftEx04:
         sample_period_s = max(0.05, min(0.2, segment_s / 2.0))
         status_poll_period_s = max(0.05, min(0.2, segment_s / 2.0))
         deadline = t0 + duration_s + 3.0
+
+        def interpolated_target(elapsed_s: float) -> tuple[float, float, float]:
+            """Return target position/velocity at the logger sample timestamp."""
+            point_phase = max(0.0, min(float(elapsed_s) / segment_s, float(len(points) - 1)))
+            lower_index = int(point_phase)
+            upper_index = min(lower_index + 1, len(points) - 1)
+            fraction = point_phase - lower_index
+            lower_pos_iu, lower_vel_iu = points[lower_index]
+            upper_pos_iu, upper_vel_iu = points[upper_index]
+            pos_iu = lower_pos_iu + (upper_pos_iu - lower_pos_iu) * fraction
+            vel_iu = lower_vel_iu + (upper_vel_iu - lower_vel_iu) * fraction
+            target_deg = self.iu_to_deg(axis, pos_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+            target_vel_deg_s = self.velocity_iu_to_deg_s(axis, vel_iu)
+            return point_phase, target_deg, target_vel_deg_s
+
         with log_path.open("w", newline="") as csv_file:
             writer = csv.DictWriter(
                 csv_file,
                 fieldnames=[
                     "t_s",
+                    "sample_wall_time_ns",
+                    "sample_monotonic_ns",
+                    "position_read_done_monotonic_ns",
+                    "position_read_duration_ms",
+                    "target_point_phase",
                     "target_deg",
                     "target_velocity_deg_s",
+                    "target_step_index",
+                    "target_step_deg",
+                    "target_step_velocity_deg_s",
                     "APOS_deg",
                     "CPOS_deg",
                     "TPOS_deg",
@@ -1327,12 +1407,23 @@ class TechnosoftEx04:
                 elif status["messages"] != last_refill_messages and stream_index < len(points) and refill_allowed:
                     refill_buffer("pvt_status_message")
                     last_refill_messages = status["messages"]
+                elif stream_index < len(points) and refill_allowed:
+                    expected_consumed_index = min(int(elapsed / segment_s), len(points) - 1)
+                    estimated_points_buffered = stream_index - expected_consumed_index
+                    if estimated_points_buffered <= buffer_info["pvt_low_level"]:
+                        refill_buffer("scheduled_low_water")
 
                 if now >= next_sample:
+                    sample_monotonic_ns = time.monotonic_ns()
+                    sample_wall_time_ns = time.time_ns()
                     pos = self.read_positions(axis)
+                    read_done_monotonic_ns = time.monotonic_ns()
+                    read_duration_ms = (read_done_monotonic_ns - sample_monotonic_ns) / 1_000_000.0
                     expected_index = min(int(elapsed / segment_s), len(points) - 1)
                     expected_pos_iu, expected_vel_iu = points[expected_index]
-                    expected_deg = self.iu_to_deg(axis, expected_pos_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+                    expected_step_deg = self.iu_to_deg(axis, expected_pos_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+                    expected_step_vel_deg_s = self.velocity_iu_to_deg_s(axis, expected_vel_iu)
+                    target_point_phase, expected_deg, expected_vel_deg_s = interpolated_target(elapsed)
                     apos_deg = float(pos["APOS_deg"])
                     tpos_deg = float(pos["TPOS_deg"])
                     actual_error_deg = apos_deg - expected_deg
@@ -1341,8 +1432,16 @@ class TechnosoftEx04:
                     writer.writerow(
                         {
                             "t_s": f"{elapsed:.4f}",
+                            "sample_wall_time_ns": sample_wall_time_ns,
+                            "sample_monotonic_ns": sample_monotonic_ns,
+                            "position_read_done_monotonic_ns": read_done_monotonic_ns,
+                            "position_read_duration_ms": f"{read_duration_ms:.3f}",
+                            "target_point_phase": f"{target_point_phase:.4f}",
                             "target_deg": f"{expected_deg:.6f}",
-                            "target_velocity_deg_s": f"{self.velocity_iu_to_deg_s(axis, expected_vel_iu):.6f}",
+                            "target_velocity_deg_s": f"{expected_vel_deg_s:.6f}",
+                            "target_step_index": expected_index,
+                            "target_step_deg": f"{expected_step_deg:.6f}",
+                            "target_step_velocity_deg_s": f"{expected_step_vel_deg_s:.6f}",
                             "APOS_deg": f"{apos_deg:.6f}",
                             "CPOS_deg": f"{float(pos['CPOS_deg']):.6f}",
                             "TPOS_deg": f"{tpos_deg:.6f}",
@@ -1376,6 +1475,19 @@ class TechnosoftEx04:
                             "last_value": status["last_value"],
                         }
                     )
+                    if sample_callback is not None:
+                        sample_callback(
+                            {
+                                "axis": axis,
+                                "t_s": elapsed,
+                                "target_deg": expected_deg,
+                                "APOS_deg": apos_deg,
+                                "TPOS_deg": tpos_deg,
+                                "APOS_minus_target_deg": actual_error_deg,
+                                "TPOS_minus_target_deg": tpos_error_deg,
+                                "APOS_minus_TPOS_deg": apos_tpos_error_deg,
+                            }
+                        )
                     samples_written += 1
                     next_sample += sample_period_s
                     if elapsed > PVT_ACTUAL_FOLLOWING_GRACE_S and abs(apos_tpos_error_deg) > PVT_ACTUAL_FOLLOWING_ERROR_DEG:

@@ -9,6 +9,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+import matplotlib
+
+matplotlib.use("TkAgg")
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+
 from technosoft_minimal_controller import (
     CHANNEL_PEAK_SYS_PCAN_USB,
     DEFAULT_BAUDRATE,
@@ -189,6 +196,29 @@ def apply_gains(axis: str) -> None:
     axis_command(axis, "apply gains", action)
 
 
+def restore_pointing_move_settings(axis: str) -> dict[str, object]:
+    """Apply the GUI's pointing/profile settings before a position move."""
+    controller.set_motion_params_deg(
+        axis,
+        float(speed_deg_s_var.get()),
+        float(accel_deg_s2_var.get()),
+        float(decel_deg_s2_var.get()),
+    )
+    gains = {}
+    for name in GAIN_NAMES:
+        text = gain_vars[axis][name].get().strip()
+        if text:
+            gains[name] = int(float(text))
+    applied_gains = controller.write_gains(axis, gains) if gains else {}
+    return {"profile": "pointing", "gains": applied_gains}
+
+
+def home_axis_with_pointing_settings(axis: str):
+    """Use this for every Home 0 request so homing setup stays centralized."""
+    restore_pointing_move_settings(axis)
+    return controller.home_absolute_deg_checked(axis, 0.0)
+
+
 def move_relative(axis: str, delta_deg: float) -> None:
     axis_command(axis, f"move relative {delta_deg:+g} deg", lambda: controller.move_relative_deg(axis, delta_deg))
 
@@ -199,7 +229,7 @@ def move_absolute(axis: str) -> None:
 
 
 def go_home(axis: str) -> None:
-    axis_command(axis, "home / vertical 0", lambda: controller.home_absolute_deg(axis, 0.0))
+    axis_command(axis, "home / vertical 0", lambda: home_axis_with_pointing_settings(axis))
 
 
 def set_vertical_zero(axis: str) -> None:
@@ -382,7 +412,7 @@ def open_satellite_pvt_window() -> None:
 
     satellite_pvt_window = tk.Toplevel(root)
     satellite_pvt_window.title("Satellite PVT")
-    satellite_pvt_window.geometry("700x430")
+    satellite_pvt_window.geometry("760x650")
     satellite_pvt_window.transient(root)
 
     def on_close() -> None:
@@ -412,6 +442,69 @@ def open_satellite_pvt_window() -> None:
     stop_track_requested = {"value": False}
     satellite_pvt_active = {"value": False}
 
+    class LiveErrorPlot(ttk.LabelFrame):
+        def __init__(self, parent):
+            super().__init__(parent, text="Live APOS - Target Error")
+            self.error_time: list[float] = []
+            self.x_error_history: list[float] = []
+            self.y_error_history: list[float] = []
+
+            self.error_fig = Figure(figsize=(7.8, 5.2), dpi=100)
+            self.error_ax_x = self.error_fig.add_subplot(211)
+            self.error_ax_y = self.error_fig.add_subplot(212, sharex=self.error_ax_x)
+            self.error_ax_x.set_title("Trajectory Error")
+            self.error_ax_x.set_ylabel("X Traj Error (deg)")
+            self.error_ax_y.set_xlabel("Time (s)")
+            self.error_ax_y.set_ylabel("Y Traj Error (deg)")
+            self.x_error_line, = self.error_ax_x.plot([], [], label="X Traj Error")
+            self.y_error_line, = self.error_ax_y.plot([], [], label="Y Traj Error", color="tab:orange")
+            self.error_ax_x.axhline(0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+            self.error_ax_x.axhline(-0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+            self.error_ax_y.axhline(0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+            self.error_ax_y.axhline(-0.03, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.8)
+            self.error_ax_x.set_ylim(-0.1, 0.1)
+            self.error_ax_y.set_ylim(-0.1, 0.1)
+            self.error_ax_x.legend(loc="upper right")
+            self.error_ax_y.legend(loc="upper right")
+            self.error_fig.tight_layout()
+
+            self.error_canvas = FigureCanvasTkAgg(self.error_fig, master=self)
+            self.error_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        def reset(self) -> None:
+            self.error_time.clear()
+            self.x_error_history.clear()
+            self.y_error_history.clear()
+            self.x_error_line.set_data([], [])
+            self.y_error_line.set_data([], [])
+            self.error_ax_x.set_xlim(0, 1)
+            self.error_ax_y.set_xlim(0, 1)
+            self.error_ax_x.set_ylim(-0.1, 0.1)
+            self.error_ax_y.set_ylim(-0.1, 0.1)
+            self.error_canvas.draw_idle()
+
+        def add_sample(self, axis: str, t_s: float, error_deg: float) -> None:
+            elapsed_sec = float(t_s)
+            error_deg = float(error_deg)
+            if axis.lower() == "x":
+                self.error_time.append(elapsed_sec)
+                self.x_error_history.append(error_deg)
+                self.y_error_history.append(float("nan"))
+            elif axis.lower() == "y":
+                self.error_time.append(elapsed_sec)
+                self.x_error_history.append(float("nan"))
+                self.y_error_history.append(error_deg)
+            else:
+                return
+            self.x_error_line.set_data(list(self.error_time), list(self.x_error_history))
+            self.y_error_line.set_data(list(self.error_time), list(self.y_error_history))
+            xmax = max(1.0, elapsed_sec)
+            self.error_ax_x.set_xlim(0, xmax)
+            self.error_ax_y.set_xlim(0, xmax)
+            self.error_ax_x.set_ylim(-0.1, 0.1)
+            self.error_ax_y.set_ylim(-0.1, 0.1)
+            self.error_canvas.draw_idle()
+
     def set_countdown(message: str) -> None:
         countdown_var.set(message)
         window.update()
@@ -424,6 +517,8 @@ def open_satellite_pvt_window() -> None:
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
     frame.columnconfigure(3, weight=1)
+    frame.rowconfigure(8, weight=1)
+    error_plot = LiveErrorPlot(frame)
 
     ttk.Label(frame, text="Latitude").grid(row=0, column=0, sticky="e", padx=5, pady=3)
     ttk.Entry(frame, textvariable=lat_var, width=12).grid(row=0, column=1, sticky="w", padx=5, pady=3)
@@ -545,9 +640,16 @@ def open_satellite_pvt_window() -> None:
                     float(decel_deg_s2_var.get()),
                 )
                 connected_axes.add(axis)
-                controller.home_absolute_deg(axis, 0.0)
+                home_axis_with_pointing_settings(axis)
             else:
                 controller.stop(axis)
+
+    def home_selected_axes_after_success() -> None:
+        for axis in selected_axis_tuple():
+            if axis not in connected_axes:
+                continue
+            controller.stop(axis)
+            home_axis_with_pointing_settings(axis)
 
     def build_current_plan():
         sat = selected_satellite()
@@ -696,6 +798,16 @@ def open_satellite_pvt_window() -> None:
         def action():
             stop_track_requested["value"] = False
             satellite_pvt_active["value"] = True
+            error_plot.reset()
+
+            def record_live_error(sample: dict[str, float | str]) -> None:
+                window.after(
+                    0,
+                    lambda axis=str(sample["axis"]),
+                    t_s=float(sample["t_s"]),
+                    error=float(sample["APOS_minus_target_deg"]): error_plot.add_sample(axis, t_s, error),
+                )
+
             try:
                 summary, samples, duration_s, _point_count, start_utc = summarize_plan(check_start=False)
                 first = samples[0]
@@ -749,6 +861,7 @@ def open_satellite_pvt_window() -> None:
                         metadata=metadata,
                         stop_requested=lambda: stop_track_requested["value"],
                         ui_pump=window.update,
+                        sample_callback=record_live_error,
                     )
                 elif satellite_axes_var.get() == "y":
                     result = controller.run_streaming_pvt_axis_deg(
@@ -758,12 +871,13 @@ def open_satellite_pvt_window() -> None:
                         metadata=metadata,
                         stop_requested=lambda: stop_track_requested["value"],
                         ui_pump=window.update,
+                        sample_callback=record_live_error,
                     )
                 else:
                     raise RuntimeError("Select axes as x, y, or both")
                 set_summary(f"{summary}; run log: {Path(str(result['log_path'])).name}")
                 set_countdown("Countdown: PVT stream complete; sending selected axis home")
-                terminate_selected_axes(home=True)
+                home_selected_axes_after_success()
                 set_countdown("Countdown: PVT stream complete; selected axis sent home")
                 return result
             except Exception:
@@ -799,6 +913,7 @@ def open_satellite_pvt_window() -> None:
     ttk.Label(frame, textvariable=countdown_var, wraplength=650).grid(
         row=7, column=0, columnspan=4, sticky="w", padx=5, pady=(6, 0)
     )
+    error_plot.grid(row=8, column=0, columnspan=4, sticky="nsew", padx=5, pady=(8, 0))
     ttk.Label(
         frame,
         text=(
@@ -807,7 +922,7 @@ def open_satellite_pvt_window() -> None:
             "Satellite runs use Sample dt s to generate the full valid pass, not a fixed debug point count."
         ),
         wraplength=650,
-    ).grid(row=8, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0))
+    ).grid(row=9, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0))
 
     if satellites:
         tle_label_var.set(satellite_tle_path.name if satellite_tle_path else "TLE already loaded")
