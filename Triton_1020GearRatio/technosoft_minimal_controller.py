@@ -1069,6 +1069,7 @@ class TechnosoftEx04:
         stop_requested=None,
         ui_pump=None,
         sample_callback=None,
+        pvt_velocity_correction: dict[str, float | int | bool] | None = None,
     ) -> dict[str, float | int | str]:
         """Stream arbitrary absolute PVT points on one axis.
 
@@ -1112,6 +1113,7 @@ class TechnosoftEx04:
             stop_requested=stop_requested,
             ui_pump=ui_pump,
             sample_callback=sample_callback,
+            pvt_velocity_correction=pvt_velocity_correction,
         )
 
     def _prepare_pvt_stream(self, axis: str) -> tuple[AxisInfo, dict[str, int], dict[str, int | float]]:
@@ -1203,12 +1205,25 @@ class TechnosoftEx04:
         stop_requested=None,
         ui_pump=None,
         sample_callback=None,
+        pvt_velocity_correction: dict[str, float | int | bool] | None = None,
     ) -> dict[str, float | int | str]:
         if not points:
             raise ValueError("PVT point list is empty")
         segment_s = segment_time_iu * info.time_scale_ms / 1000.0
         log_path = self._new_pvt_log_path(axis)
         samples_written = 0
+        correction_config = dict(pvt_velocity_correction or {})
+        correction_enabled = bool(int(float(correction_config.get("enable", 0))))
+        correction_kp = float(correction_config.get("kp", 0.0))
+        correction_max = abs(float(correction_config.get("max_deg_s", 0.0)))
+        correction_alpha = max(0.0, min(0.999, float(correction_config.get("alpha", 0.0))))
+        correction_state = {"deg_s": 0.0}
+
+        def corrected_velocity_iu(point_index: int, base_vel_iu: float) -> float:
+            if not correction_enabled or point_index >= len(points) - 1:
+                return base_vel_iu
+            return base_vel_iu + self.velocity_deg_s_to_iu(axis, correction_state["deg_s"])
+
         self.check(self.dll.TS_GOTO(0x4000), "TS_GOTO(0x4000)")
         buffer_info = self._pvt_setup(axis)
         first_pos, first_vel = points[0]
@@ -1218,7 +1233,7 @@ class TechnosoftEx04:
         self.check(
             self.dll.TS_SendPVTFirstPoint(
                 first_pos,
-                first_vel,
+                corrected_velocity_iu(0, first_vel),
                 segment_time_iu,
                 counter_pc,
                 ABSOLUTE_POSITION,
@@ -1251,7 +1266,12 @@ class TechnosoftEx04:
             counter_pc += 1
             pos_iu, vel_iu = points[stream_index]
             self.check(
-                self.dll.TS_SendPVTPoint(pos_iu, vel_iu, segment_time_iu, counter_pc),
+                self.dll.TS_SendPVTPoint(
+                    pos_iu,
+                    corrected_velocity_iu(stream_index, vel_iu),
+                    segment_time_iu,
+                    counter_pc,
+                ),
                 "TS_SendPVTPoint",
             )
             counter_pc &= PVT_COUNTER_MASK
@@ -1286,7 +1306,12 @@ class TechnosoftEx04:
                 counter_pc += 1
                 pos_iu, vel_iu = points[stream_index]
                 self.check(
-                    self.dll.TS_SendPVTPoint(pos_iu, vel_iu, segment_time_iu, counter_pc),
+                    self.dll.TS_SendPVTPoint(
+                        pos_iu,
+                        corrected_velocity_iu(stream_index, vel_iu),
+                        segment_time_iu,
+                        counter_pc,
+                    ),
                     "TS_SendPVTPoint",
                 )
                 counter_pc &= PVT_COUNTER_MASK
@@ -1339,6 +1364,11 @@ class TechnosoftEx04:
                     "target_point_phase",
                     "target_deg",
                     "target_velocity_deg_s",
+                    "pvt_velocity_correction_enabled",
+                    "pvt_velocity_correction_kp",
+                    "pvt_velocity_correction_max_deg_s",
+                    "pvt_velocity_correction_alpha",
+                    "pvt_velocity_correction_deg_s",
                     "target_step_index",
                     "target_step_deg",
                     "target_step_velocity_deg_s",
@@ -1429,6 +1459,15 @@ class TechnosoftEx04:
                     actual_error_deg = apos_deg - expected_deg
                     tpos_error_deg = tpos_deg - expected_deg
                     apos_tpos_error_deg = apos_deg - tpos_deg
+                    if correction_enabled and correction_kp != 0.0 and correction_max > 0.0:
+                        raw_correction_deg_s = -correction_kp * actual_error_deg
+                        raw_correction_deg_s = max(-correction_max, min(correction_max, raw_correction_deg_s))
+                        correction_state["deg_s"] = (
+                            correction_alpha * correction_state["deg_s"]
+                            + (1.0 - correction_alpha) * raw_correction_deg_s
+                        )
+                    else:
+                        correction_state["deg_s"] = 0.0
                     writer.writerow(
                         {
                             "t_s": f"{elapsed:.4f}",
@@ -1439,6 +1478,11 @@ class TechnosoftEx04:
                             "target_point_phase": f"{target_point_phase:.4f}",
                             "target_deg": f"{expected_deg:.6f}",
                             "target_velocity_deg_s": f"{expected_vel_deg_s:.6f}",
+                            "pvt_velocity_correction_enabled": int(correction_enabled),
+                            "pvt_velocity_correction_kp": f"{correction_kp:.6f}",
+                            "pvt_velocity_correction_max_deg_s": f"{correction_max:.6f}",
+                            "pvt_velocity_correction_alpha": f"{correction_alpha:.6f}",
+                            "pvt_velocity_correction_deg_s": f"{correction_state['deg_s']:.6f}",
                             "target_step_index": expected_index,
                             "target_step_deg": f"{expected_step_deg:.6f}",
                             "target_step_velocity_deg_s": f"{expected_step_vel_deg_s:.6f}",
@@ -1486,6 +1530,7 @@ class TechnosoftEx04:
                                 "APOS_minus_target_deg": actual_error_deg,
                                 "TPOS_minus_target_deg": tpos_error_deg,
                                 "APOS_minus_TPOS_deg": apos_tpos_error_deg,
+                                "pvt_velocity_correction_deg_s": correction_state["deg_s"],
                             }
                         )
                     samples_written += 1
@@ -1522,6 +1567,10 @@ class TechnosoftEx04:
                 "pvt_buffer_old_len_words": buffer_info["pvt_buffer_old_len_words"],
                 "pvt_buffer_len_words": buffer_info["pvt_buffer_len_words"],
                 "pvt_start_reason": update_reason,
+                "pvt_velocity_correction_enabled": int(correction_enabled),
+                "pvt_velocity_correction_kp": correction_kp,
+                "pvt_velocity_correction_max_deg_s": correction_max,
+                "pvt_velocity_correction_alpha": correction_alpha,
                 "raw_messages": status["raw_messages"],
                 "pvt_messages": status["messages"],
                 "last_message_address": f"0x{status['last_address']:04X}",

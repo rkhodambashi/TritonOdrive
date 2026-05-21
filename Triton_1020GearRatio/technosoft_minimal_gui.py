@@ -433,6 +433,10 @@ def open_satellite_pvt_window() -> None:
     derivative_dt_var = tk.StringVar(value="0.2")
     max_start_error_var = tk.StringVar(value="2")
     max_abs_angle_var = tk.StringVar(value="91")
+    pvt_vcorr_enable_var = tk.StringVar(value="0")
+    pvt_vcorr_kp_var = tk.StringVar(value="0")
+    pvt_vcorr_max_var = tk.StringVar(value="0.2")
+    pvt_vcorr_alpha_var = tk.StringVar(value="0")
     satellite_axes_var = tk.StringVar(value="x")
     tle_load_limit_var = tk.StringVar(value=str(DEFAULT_SATELLITE_TLE_LOAD_LIMIT))
     satellite_search_var = tk.StringVar(value="")
@@ -589,6 +593,10 @@ def open_satellite_pvt_window() -> None:
         ("Derivative dt s", derivative_dt_var),
         ("Max start err deg", max_start_error_var),
         ("Max abs angle deg", max_abs_angle_var),
+        ("V Corr Enable", pvt_vcorr_enable_var),
+        ("V Corr Kp 1/s", pvt_vcorr_kp_var),
+        ("V Corr Max deg/s", pvt_vcorr_max_var),
+        ("V Corr Alpha", pvt_vcorr_alpha_var),
     ]
     for index, (label_text, variable) in enumerate(entries):
         row = index // 3
@@ -645,11 +653,10 @@ def open_satellite_pvt_window() -> None:
                 controller.stop(axis)
 
     def home_selected_axes_after_success() -> None:
-        for axis in selected_axis_tuple():
-            if axis not in connected_axes:
-                continue
-            controller.stop(axis)
-            home_axis_with_pointing_settings(axis)
+        try:
+            terminate_selected_axes(home=True)
+        except Exception as exc:
+            log(f"Home after successful PVT warning: {exc}")
 
     def build_current_plan():
         sat = selected_satellite()
@@ -846,6 +853,12 @@ def open_satellite_pvt_window() -> None:
                     "axes": satellite_axes_var.get(),
                     "reference_log": str(reference_path),
                 }
+                pvt_velocity_correction = {
+                    "enable": int(float(pvt_vcorr_enable_var.get())),
+                    "kp": float(pvt_vcorr_kp_var.get()),
+                    "max_deg_s": float(pvt_vcorr_max_var.get()),
+                    "alpha": float(pvt_vcorr_alpha_var.get()),
+                }
                 if satellite_axes_var.get() == "both":
                     result = controller.run_streaming_pvt_xy_deg(
                         x_points,
@@ -862,6 +875,7 @@ def open_satellite_pvt_window() -> None:
                         stop_requested=lambda: stop_track_requested["value"],
                         ui_pump=window.update,
                         sample_callback=record_live_error,
+                        pvt_velocity_correction=pvt_velocity_correction,
                     )
                 elif satellite_axes_var.get() == "y":
                     result = controller.run_streaming_pvt_axis_deg(
@@ -872,6 +886,7 @@ def open_satellite_pvt_window() -> None:
                         stop_requested=lambda: stop_track_requested["value"],
                         ui_pump=window.update,
                         sample_callback=record_live_error,
+                        pvt_velocity_correction=pvt_velocity_correction,
                     )
                 else:
                     raise RuntimeError("Select axes as x, y, or both")
