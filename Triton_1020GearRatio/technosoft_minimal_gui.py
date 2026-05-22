@@ -213,10 +213,22 @@ def restore_pointing_move_settings(axis: str) -> dict[str, object]:
     return {"profile": "pointing", "gains": applied_gains}
 
 
-def home_axis_with_pointing_settings(axis: str):
-    """Use this for every Home 0 request so homing setup stays centralized."""
+def go_axis_home(axis: str, recover: bool = False):
+    """Single home entry point used by buttons, completed tracks, and aborts."""
+    if recover:
+        try:
+            controller.stop(axis)
+        except Exception as exc:
+            log(f"{axis.upper()} stop before home ignored: {exc}")
+        try:
+            controller.power(axis, False)
+        except Exception as exc:
+            log(f"{axis.upper()} power off before home ignored: {exc}")
+        time.sleep(0.2)
+        controller.vendor_init_axis(get_axis_config(axis))
+        connected_axes.add(axis)
     restore_pointing_move_settings(axis)
-    return controller.home_absolute_deg_checked(axis, 0.0)
+    return controller.home_absolute_deg_checked(axis, 0.0, following_error_deg=45.0)
 
 
 def move_relative(axis: str, delta_deg: float) -> None:
@@ -229,7 +241,7 @@ def move_absolute(axis: str) -> None:
 
 
 def go_home(axis: str) -> None:
-    axis_command(axis, "home / vertical 0", lambda: home_axis_with_pointing_settings(axis))
+    axis_command(axis, "home / vertical 0", lambda: go_axis_home(axis, recover=False))
 
 
 def set_vertical_zero(axis: str) -> None:
@@ -386,8 +398,10 @@ def write_satellite_reference_log(sat_name: str, samples: list[dict[str, float |
         writer = csv.DictWriter(
             csv_file,
             fieldnames=[
+                "phase",
                 "utc_time",
                 "offset_s",
+                "phase_elapsed_s",
                 "visible",
                 "az_deg",
                 "el_deg",
@@ -399,8 +413,100 @@ def write_satellite_reference_log(sat_name: str, samples: list[dict[str, float |
         )
         writer.writeheader()
         for sample in samples:
-            writer.writerow(sample)
+            writer.writerow(
+                {
+                    "phase": sample.get("phase", "track"),
+                    "utc_time": sample.get("utc_time", ""),
+                    "offset_s": sample.get("offset_s", 0.0),
+                    "phase_elapsed_s": sample.get("phase_elapsed_s", sample.get("offset_s", 0.0)),
+                    "visible": sample.get("visible", False),
+                    "az_deg": sample.get("az_deg", 0.0),
+                    "el_deg": sample.get("el_deg", 0.0),
+                    "x_angle_deg": sample.get("x_angle_deg", 0.0),
+                    "y_angle_deg": sample.get("y_angle_deg", 0.0),
+                    "x_vel_deg_s": sample.get("x_vel_deg_s", 0.0),
+                    "y_vel_deg_s": sample.get("y_vel_deg_s", 0.0),
+                }
+            )
     return path
+
+
+def build_full_session_reference_samples(
+    track_samples: list[dict[str, float | bool | str]],
+    wait_before_track_s: float,
+) -> list[dict[str, float | bool | str]]:
+    if not track_samples:
+        return []
+    wait_before_track_s = max(0.0, float(wait_before_track_s))
+    first = dict(track_samples[0])
+    session_samples: list[dict[str, float | bool | str]] = []
+    preposition_row = dict(first)
+    preposition_row.update(
+        {
+            "phase": "preposition",
+            "offset_s": 0.0,
+            "phase_elapsed_s": 0.0,
+            "x_vel_deg_s": 0.0,
+            "y_vel_deg_s": 0.0,
+        }
+    )
+    session_samples.append(preposition_row)
+    wait_row = dict(first)
+    wait_row.update(
+        {
+            "phase": "wait",
+            "offset_s": wait_before_track_s,
+            "phase_elapsed_s": wait_before_track_s,
+            "x_vel_deg_s": 0.0,
+            "y_vel_deg_s": 0.0,
+        }
+    )
+    session_samples.append(wait_row)
+    for sample in track_samples:
+        track_row = dict(sample)
+        track_offset_s = float(sample["offset_s"])
+        track_row.update(
+            {
+                "phase": "track",
+                "offset_s": wait_before_track_s + track_offset_s,
+                "phase_elapsed_s": track_offset_s,
+            }
+        )
+        session_samples.append(track_row)
+    return session_samples
+
+
+def load_satellite_reference_log(path: Path) -> list[dict[str, float | bool | str]]:
+    samples: list[dict[str, float | bool | str]] = []
+    with Path(path).open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        required = {"offset_s", "x_angle_deg", "y_angle_deg", "x_vel_deg_s", "y_vel_deg_s"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Replay CSV missing columns: {', '.join(sorted(missing))}")
+        for row in reader:
+            offset_s = float(row["offset_s"])
+            samples.append(
+                {
+                    "phase": (row.get("phase") or "track").strip().lower(),
+                    "utc_time": row.get("utc_time", ""),
+                    "offset_s": offset_s,
+                    "phase_elapsed_s": float(row.get("phase_elapsed_s") or offset_s),
+                    "visible": str(row.get("visible", "")).lower() in ("1", "true", "yes"),
+                    "az_deg": float(row.get("az_deg") or 0.0),
+                    "el_deg": float(row.get("el_deg") or 0.0),
+                    "x_angle_deg": float(row["x_angle_deg"]),
+                    "y_angle_deg": float(row["y_angle_deg"]),
+                    "x_vel_deg_s": float(row["x_vel_deg_s"]),
+                    "y_vel_deg_s": float(row["y_vel_deg_s"]),
+                }
+            )
+    if len(samples) < 2:
+        raise ValueError("Replay CSV must contain at least two samples.")
+    first_offset = float(samples[0]["offset_s"])
+    for sample in samples:
+        sample["offset_s"] = float(sample["offset_s"]) - first_offset
+    return samples
 
 
 def open_satellite_pvt_window() -> None:
@@ -438,13 +544,16 @@ def open_satellite_pvt_window() -> None:
     pvt_vcorr_max_var = tk.StringVar(value="0.2")
     pvt_vcorr_alpha_var = tk.StringVar(value="0")
     satellite_axes_var = tk.StringVar(value="x")
+    reference_mode_var = tk.StringVar(value="live")
     tle_load_limit_var = tk.StringVar(value=str(DEFAULT_SATELLITE_TLE_LOAD_LIMIT))
     satellite_search_var = tk.StringVar(value="")
     tle_label_var = tk.StringVar(value="No TLE selected")
+    replay_label_var = tk.StringVar(value="No replay selected")
     summary_var = tk.StringVar(value="Load a TLE, choose a satellite, preview, then run.")
     countdown_var = tk.StringVar(value="Countdown: -")
     stop_track_requested = {"value": False}
     satellite_pvt_active = {"value": False}
+    replay_state: dict[str, object] = {"path": None, "samples": [], "name": "Replay"}
 
     class LiveErrorPlot(ttk.LabelFrame):
         def __init__(self, parent):
@@ -521,7 +630,7 @@ def open_satellite_pvt_window() -> None:
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
     frame.columnconfigure(3, weight=1)
-    frame.rowconfigure(8, weight=1)
+    frame.rowconfigure(9, weight=1)
     error_plot = LiveErrorPlot(frame)
 
     ttk.Label(frame, text="Latitude").grid(row=0, column=0, sticky="e", padx=5, pady=3)
@@ -565,6 +674,27 @@ def open_satellite_pvt_window() -> None:
             f"(load limit {load_limit})"
         )
 
+    def browse_replay() -> None:
+        file_path = filedialog.askopenfilename(
+            initialdir=str(pvt_log_dir()),
+            filetypes=[("Technosoft Reference CSV", "technosoft_satellite_reference_*.csv"), ("CSV Files", "*.csv"), ("All Files", "*.*")],
+        )
+        if not file_path:
+            return
+        path = Path(file_path)
+        try:
+            samples = load_satellite_reference_log(path)
+        except Exception as exc:
+            set_summary(f"Replay load failed: {exc}")
+            log(f"Satellite PVT replay load FAILED: {exc}")
+            return
+        name = path.stem.replace("technosoft_satellite_reference_", "")
+        replay_state.update({"path": path, "samples": samples, "name": name})
+        replay_label_var.set(path.name)
+        reference_mode_var.set("replay")
+        duration_s = float(samples[-1]["offset_s"]) - float(samples[0]["offset_s"])
+        set_summary(f"Loaded replay {path.name}: {duration_s:g}s/{len(samples) - 1} PVT segments")
+
     ttk.Button(frame, text="Browse TLE", command=browse_tle).grid(row=1, column=0, sticky="ew", padx=5, pady=(10, 3))
     ttk.Label(frame, textvariable=tle_label_var).grid(row=1, column=1, sticky="w", padx=5, pady=(10, 3))
     ttk.Label(frame, text="Load count").grid(row=1, column=2, sticky="e", padx=5, pady=(10, 3))
@@ -577,9 +707,19 @@ def open_satellite_pvt_window() -> None:
     ttk.Button(frame, text="Refresh Passes", command=refresh_satellite_list).grid(row=2, column=3, sticky="ew", padx=5, pady=3)
     ttk.Label(frame, text="Satellite").grid(row=3, column=0, sticky="e", padx=5, pady=3)
     sat_combo.grid(row=3, column=1, columnspan=3, sticky="ew", padx=5, pady=3)
+    ttk.Label(frame, text="Reference").grid(row=4, column=0, sticky="e", padx=5, pady=3)
+    ttk.Combobox(
+        frame,
+        textvariable=reference_mode_var,
+        values=("live", "replay"),
+        state="readonly",
+        width=10,
+    ).grid(row=4, column=1, sticky="w", padx=5, pady=3)
+    ttk.Button(frame, text="Load Replay CSV", command=browse_replay).grid(row=4, column=2, sticky="ew", padx=5, pady=3)
+    ttk.Label(frame, textvariable=replay_label_var).grid(row=4, column=3, sticky="w", padx=5, pady=3)
 
     settings = ttk.LabelFrame(frame, text="PVT Segment", padding=8)
-    settings.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(12, 6))
+    settings.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 6))
     for col in range(6):
         settings.columnconfigure(col, weight=1 if col % 2 else 0)
 
@@ -628,37 +768,49 @@ def open_satellite_pvt_window() -> None:
             if axis not in connected_axes:
                 continue
             if home:
-                # A failed/aborted PVT run can leave the drive in a state where
-                # a light stop is not enough. Match the manual recovery sequence
-                # that has been reliable: power off, vendor init, then home.
-                try:
-                    controller.stop(axis)
-                except Exception as exc:
-                    log(f"{axis.upper()} stop before recovery ignored: {exc}")
-                try:
-                    controller.power(axis, False)
-                except Exception as exc:
-                    log(f"{axis.upper()} power off before recovery ignored: {exc}")
-                time.sleep(0.2)
-                controller.vendor_init_axis(get_axis_config(axis))
-                controller.set_motion_params_deg(
-                    axis,
-                    float(speed_deg_s_var.get()),
-                    float(accel_deg_s2_var.get()),
-                    float(decel_deg_s2_var.get()),
-                )
-                connected_axes.add(axis)
-                home_axis_with_pointing_settings(axis)
+                go_axis_home(axis, recover=True)
             else:
                 controller.stop(axis)
 
     def home_selected_axes_after_success() -> None:
-        try:
-            terminate_selected_axes(home=True)
-        except Exception as exc:
-            log(f"Home after successful PVT warning: {exc}")
+        terminate_selected_axes(home=True)
 
     def build_current_plan():
+        if reference_mode_var.get() == "replay":
+            all_samples = [dict(sample) for sample in replay_state["samples"]]
+            if len(all_samples) < 2:
+                raise RuntimeError("Load a replay CSV first.")
+            track_samples = [sample for sample in all_samples if str(sample.get("phase", "track")).lower() == "track"]
+            if len(track_samples) < 2:
+                raise RuntimeError("Replay CSV must contain at least two track samples.")
+            first_track_offset_s = float(track_samples[0]["offset_s"])
+            samples = []
+            for sample in track_samples:
+                normalized = dict(sample)
+                normalized["offset_s"] = float(sample["offset_s"]) - first_track_offset_s
+                normalized["phase_elapsed_s"] = normalized["offset_s"]
+                normalized["phase"] = "track"
+                samples.append(normalized)
+            duration_s = float(samples[-1]["offset_s"]) - float(samples[0]["offset_s"])
+            point_count = len(samples) - 1
+            sample_period_s = duration_s / point_count if point_count > 0 else 0.0
+            replay_wait_s = max(0.0, first_track_offset_s)
+            start_utc = datetime.now(timezone.utc) + timedelta(seconds=replay_wait_s)
+            end_utc = start_utc + timedelta(seconds=duration_s)
+            return (
+                None,
+                str(replay_state["name"]),
+                samples,
+                duration_s,
+                point_count,
+                datetime.now(timezone.utc),
+                start_utc,
+                start_utc,
+                end_utc,
+                sample_period_s,
+                0,
+            )
+
         sat = selected_satellite()
         sample_period_s = max(0.2, float(sample_period_var.get()))
         lead_in_points = max(0, int(float(lead_in_points_var.get())))
@@ -712,6 +864,7 @@ def open_satellite_pvt_window() -> None:
             if max(max_x, max_y) <= max_abs_angle:
                 return (
                     sat,
+                    sat.name,
                     samples,
                     duration_s,
                     point_count,
@@ -730,6 +883,7 @@ def open_satellite_pvt_window() -> None:
     def summarize_plan(check_start: bool) -> tuple[str, list[dict[str, float | bool | str]], float, int, datetime]:
         (
             sat,
+            sat_name,
             samples,
             duration_s,
             point_count,
@@ -775,10 +929,18 @@ def open_satellite_pvt_window() -> None:
                     f"Start point is too far from current APOS{start_error_text}. "
                     f"Limit is {max_start_error:.3f} deg. Preposition closer first."
                 )
-        rise = next_rise_utc(sat, float(lat_var.get()), float(lon_var.get()))
+        rise = None if sat is None else next_rise_utc(sat, float(lat_var.get()), float(lon_var.get()))
         wait_s = (start_utc - datetime.now(timezone.utc)).total_seconds()
+        if reference_mode_var.get() == "replay":
+            summary = (
+                f"{sat_name} [Replay]: {duration_s:g}s/{point_count} points at {sample_period_s:g}s, "
+                f"first X={float(first['x_angle_deg']):.3f} Y={float(first['y_angle_deg']):.3f}, "
+                f"last X={float(last['x_angle_deg']):.3f} Y={float(last['y_angle_deg']):.3f}, "
+                f"visible {sum(1 for sample in samples if sample['visible'])}/{len(samples)}{start_error_text}"
+            )
+            return summary, samples, duration_s, point_count, start_utc
         summary = (
-            f"{sat.name}: {duration_s:g}s/{point_count} points at {sample_period_s:g}s, lead-in {lead_in_points} pts, "
+            f"{sat_name}: {duration_s:g}s/{point_count} points at {sample_period_s:g}s, lead-in {lead_in_points} pts, "
             f"first X={float(first['x_angle_deg']):.3f} Y={float(first['y_angle_deg']):.3f}, "
             f"last X={float(last['x_angle_deg']):.3f} Y={float(last['y_angle_deg']):.3f}, "
             f"visible {sum(1 for sample in samples if sample['visible'])}/{len(samples)}, "
@@ -792,10 +954,21 @@ def open_satellite_pvt_window() -> None:
     def preview_satellite_pvt() -> None:
         try:
             summary, samples, _duration_s, _point_count, _start_utc = summarize_plan(check_start=False)
-            reference_path = write_satellite_reference_log(selected_satellite().name, samples)
-            set_summary(f"{summary}; reference log: {reference_path.name}")
+            if reference_mode_var.get() == "replay":
+                replay_path = replay_state["path"]
+                reference_note = Path(str(replay_path)).name if replay_path else "loaded replay CSV"
+                set_summary(f"{summary}; replay source: {reference_note}")
+                log(f"Satellite PVT preview OK: {summary}; replay={replay_path}")
+            else:
+                reference_name = selected_satellite().name
+                preview_wait_s = max(0.0, (_start_utc - datetime.now(timezone.utc)).total_seconds())
+                reference_path = write_satellite_reference_log(
+                    reference_name,
+                    build_full_session_reference_samples(samples, preview_wait_s),
+                )
+                set_summary(f"{summary}; full-session reference log: {reference_path.name}")
+                log(f"Satellite PVT preview OK: {summary}; reference={reference_path}")
             set_countdown(f"Countdown: start at {format_local_datetime(_start_utc)}")
-            log(f"Satellite PVT preview OK: {summary}; reference={reference_path}")
         except Exception as exc:
             set_summary(f"Preview failed: {exc}")
             set_countdown("Countdown: -")
@@ -823,12 +996,32 @@ def open_satellite_pvt_window() -> None:
                 missing_axes = [axis for axis in required_axes if axis not in connected_axes]
                 if missing_axes:
                     raise RuntimeError(f"Connect {', '.join(axis.upper() for axis in missing_axes)} before running satellite PVT")
+                max_start_error_deg = float(max_start_error_var.get())
                 if selected_axes in ("x", "both"):
-                    controller.move_absolute_deg("x", float(first["x_angle_deg"]))
+                    restore_pointing_move_settings("x")
+                    controller.move_absolute_deg_checked(
+                        "x",
+                        float(first["x_angle_deg"]),
+                        tolerance_deg=max_start_error_deg,
+                    )
                 if selected_axes in ("y", "both"):
-                    controller.move_absolute_deg("y", float(first["y_angle_deg"]))
-                set_summary(f"Preposition target sent; waiting for PVT start: {summary}")
+                    restore_pointing_move_settings("y")
+                    controller.move_absolute_deg_checked(
+                        "y",
+                        float(first["y_angle_deg"]),
+                        tolerance_deg=max_start_error_deg,
+                    )
                 wait_s = (start_utc - datetime.now(timezone.utc)).total_seconds()
+                if reference_mode_var.get() == "replay":
+                    reference_path = Path(str(replay_state["path"]))
+                    reference_name = str(replay_state["name"])
+                else:
+                    reference_name = selected_satellite().name
+                    reference_path = write_satellite_reference_log(
+                        reference_name,
+                        build_full_session_reference_samples(samples, max(0.0, wait_s)),
+                    )
+                set_summary(f"Preposition settled; waiting for PVT start: {summary}; reference: {reference_path.name}")
                 if wait_s > 0:
                     log(f"Satellite PVT waiting {wait_s:.2f}s for pickup/start time")
                     while wait_s > 0:
@@ -844,12 +1037,12 @@ def open_satellite_pvt_window() -> None:
                     set_countdown("Countdown: pickup time reached; starting PVT stream now")
                 if stop_track_requested["value"]:
                     raise RuntimeError("Satellite PVT stopped before stream start")
-                reference_path = write_satellite_reference_log(selected_satellite().name, samples)
                 x_points = [(float(sample["x_angle_deg"]), float(sample["x_vel_deg_s"])) for sample in samples[1:]]
                 y_points = [(float(sample["y_angle_deg"]), float(sample["y_vel_deg_s"])) for sample in samples[1:]]
                 metadata = {
                     "trajectory": "satellite",
-                    "satellite": selected_satellite().name,
+                    "satellite": reference_name,
+                    "reference_mode": reference_mode_var.get(),
                     "axes": satellite_axes_var.get(),
                     "reference_log": str(reference_path),
                 }
@@ -917,18 +1110,18 @@ def open_satellite_pvt_window() -> None:
         run_worker("Satellite stop/home", action)
 
     button_row = ttk.Frame(frame)
-    button_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 4))
+    button_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 4))
     ttk.Button(button_row, text="Preview / Write Reference", command=preview_satellite_pvt).pack(side="left", padx=(0, 8))
     ttk.Button(button_row, text="Run Satellite PVT", command=run_satellite_pvt).pack(side="left")
     ttk.Button(button_row, text="Stop Track / Home", command=stop_satellite_pvt).pack(side="left", padx=(8, 0))
 
     ttk.Label(frame, textvariable=summary_var, wraplength=650).grid(
-        row=6, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0)
+        row=7, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0)
     )
     ttk.Label(frame, textvariable=countdown_var, wraplength=650).grid(
-        row=7, column=0, columnspan=4, sticky="w", padx=5, pady=(6, 0)
+        row=8, column=0, columnspan=4, sticky="w", padx=5, pady=(6, 0)
     )
-    error_plot.grid(row=8, column=0, columnspan=4, sticky="nsew", padx=5, pady=(8, 0))
+    error_plot.grid(row=9, column=0, columnspan=4, sticky="nsew", padx=5, pady=(8, 0))
     ttk.Label(
         frame,
         text=(
@@ -937,7 +1130,7 @@ def open_satellite_pvt_window() -> None:
             "Satellite runs use Sample dt s to generate the full valid pass, not a fixed debug point count."
         ),
         wraplength=650,
-    ).grid(row=9, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0))
+    ).grid(row=10, column=0, columnspan=4, sticky="w", padx=5, pady=(10, 0))
 
     if satellites:
         tle_label_var.set(satellite_tle_path.name if satellite_tle_path else "TLE already loaded")
