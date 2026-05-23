@@ -543,6 +543,21 @@ def open_satellite_pvt_window() -> None:
     pvt_vcorr_kp_var = tk.StringVar(value="0")
     pvt_vcorr_max_var = tk.StringVar(value="0.2")
     pvt_vcorr_alpha_var = tk.StringVar(value="0")
+    pvt_pcorr_enable_var = tk.StringVar(value="0")
+    pvt_pcorr_kp_var = tk.StringVar(value="0")
+    pvt_pcorr_kp_per_vel_var = tk.StringVar(value="0")
+    pvt_pcorr_max_var = tk.StringVar(value="0.05")
+    pvt_pcorr_alpha_var = tk.StringVar(value="0")
+    pvt_pbias_enable_var = tk.StringVar(value="0")
+    pvt_pbias_kp_var = tk.StringVar(value="0")
+    pvt_pbias_adapt_var = tk.StringVar(value="0")
+    pvt_pbias_max_var = tk.StringVar(value="0.05")
+    pvt_pi_enable_var = tk.StringVar(value="0")
+    pvt_pi_ki_var = tk.StringVar(value="0")
+    pvt_pi_max_var = tk.StringVar(value="0.03")
+    pvt_pi_leak_var = tk.StringVar(value="1")
+    pvt_queue_target_var = tk.StringVar(value="0")
+    pvt_queue_refill_var = tk.StringVar(value="0")
     satellite_axes_var = tk.StringVar(value="x")
     reference_mode_var = tk.StringVar(value="live")
     tle_load_limit_var = tk.StringVar(value=str(DEFAULT_SATELLITE_TLE_LOAD_LIMIT))
@@ -737,6 +752,21 @@ def open_satellite_pvt_window() -> None:
         ("V Corr Kp 1/s", pvt_vcorr_kp_var),
         ("V Corr Max deg/s", pvt_vcorr_max_var),
         ("V Corr Alpha", pvt_vcorr_alpha_var),
+        ("P Corr Enable", pvt_pcorr_enable_var),
+        ("P Corr Kp", pvt_pcorr_kp_var),
+        ("P Corr Kp/V", pvt_pcorr_kp_per_vel_var),
+        ("P Corr Max deg", pvt_pcorr_max_var),
+        ("P Corr Alpha", pvt_pcorr_alpha_var),
+        ("P Bias Enable", pvt_pbias_enable_var),
+        ("P Bias Kp", pvt_pbias_kp_var),
+        ("P Bias Adapt", pvt_pbias_adapt_var),
+        ("P Bias Max deg", pvt_pbias_max_var),
+        ("P I Enable", pvt_pi_enable_var),
+        ("P I Ki 1/s", pvt_pi_ki_var),
+        ("P I Max deg", pvt_pi_max_var),
+        ("P I Leak", pvt_pi_leak_var),
+        ("PVT Queue Target", pvt_queue_target_var),
+        ("PVT Refill Points", pvt_queue_refill_var),
     ]
     for index, (label_text, variable) in enumerate(entries):
         row = index // 3
@@ -1052,6 +1082,25 @@ def open_satellite_pvt_window() -> None:
                     "max_deg_s": float(pvt_vcorr_max_var.get()),
                     "alpha": float(pvt_vcorr_alpha_var.get()),
                 }
+                pvt_position_correction = {
+                    "enable": int(float(pvt_pcorr_enable_var.get())),
+                    "kp": float(pvt_pcorr_kp_var.get()),
+                    "kp_per_vel": float(pvt_pcorr_kp_per_vel_var.get()),
+                    "max_deg": float(pvt_pcorr_max_var.get()),
+                    "alpha": float(pvt_pcorr_alpha_var.get()),
+                    "bias_enable": int(float(pvt_pbias_enable_var.get())),
+                    "bias_kp": float(pvt_pbias_kp_var.get()),
+                    "bias_adapt": float(pvt_pbias_adapt_var.get()),
+                    "bias_max_deg": float(pvt_pbias_max_var.get()),
+                    "i_enable": int(float(pvt_pi_enable_var.get())),
+                    "i_ki": float(pvt_pi_ki_var.get()),
+                    "i_max_deg": float(pvt_pi_max_var.get()),
+                    "i_leak": float(pvt_pi_leak_var.get()),
+                }
+                pvt_queue_config = {
+                    "target_points": int(float(pvt_queue_target_var.get())),
+                    "refill_points": int(float(pvt_queue_refill_var.get())),
+                }
                 if satellite_axes_var.get() == "both":
                     result = controller.run_streaming_pvt_xy_deg(
                         x_points,
@@ -1069,6 +1118,8 @@ def open_satellite_pvt_window() -> None:
                         ui_pump=window.update,
                         sample_callback=record_live_error,
                         pvt_velocity_correction=pvt_velocity_correction,
+                        pvt_position_correction=pvt_position_correction,
+                        pvt_queue_config=pvt_queue_config,
                     )
                 elif satellite_axes_var.get() == "y":
                     result = controller.run_streaming_pvt_axis_deg(
@@ -1080,6 +1131,8 @@ def open_satellite_pvt_window() -> None:
                         ui_pump=window.update,
                         sample_callback=record_live_error,
                         pvt_velocity_correction=pvt_velocity_correction,
+                        pvt_position_correction=pvt_position_correction,
+                        pvt_queue_config=pvt_queue_config,
                     )
                 else:
                     raise RuntimeError("Select axes as x, y, or both")

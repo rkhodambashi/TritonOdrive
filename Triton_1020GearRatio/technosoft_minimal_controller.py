@@ -35,7 +35,7 @@ DEFAULT_CHANNEL_NAME = "1"
 DEFAULT_HOST_ID = 255
 DEFAULT_BAUDRATE = 1_000_000
 PVT_MAX_TIME_IU = 511
-PVT_MIN_FALLBACK_TIME_MS = 200
+PVT_MIN_FALLBACK_TIME_MS = 100
 PVT_MAX_PRELOAD_POINTS = 8
 PVT_TARGET_TOLERANCE_DEG = 0.25
 PVT_ACTUAL_FOLLOWING_ERROR_DEG = 5.0
@@ -617,10 +617,8 @@ class TechnosoftEx04:
         )
 
     def home_absolute_deg(self, axis: str, target_deg: float = 0.0) -> None:
-        """Start Home from the measured position, not a stale reference path."""
+        """Start Home using the same absolute position command path as manual moves."""
         info = self.select_axis(axis)
-        self.check(self.dll.TS_Stop(), "TS_Stop")
-        self.check(self.dll.TS_SetTargetPositionToActual(), "TS_SetTargetPositionToActual")
         target_iu = self.absolute_deg_to_iu(axis, target_deg)
         self.check(
             self.dll.TS_MoveAbsolute(
@@ -1070,6 +1068,8 @@ class TechnosoftEx04:
         ui_pump=None,
         sample_callback=None,
         pvt_velocity_correction: dict[str, float | int | bool] | None = None,
+        pvt_position_correction: dict[str, float | int | bool] | None = None,
+        pvt_queue_config: dict[str, float | int | bool] | None = None,
     ) -> dict[str, float | int | str]:
         """Stream arbitrary absolute PVT points on one axis.
 
@@ -1114,6 +1114,8 @@ class TechnosoftEx04:
             ui_pump=ui_pump,
             sample_callback=sample_callback,
             pvt_velocity_correction=pvt_velocity_correction,
+            pvt_position_correction=pvt_position_correction,
+            pvt_queue_config=pvt_queue_config,
         )
 
     def _prepare_pvt_stream(self, axis: str) -> tuple[AxisInfo, dict[str, int], dict[str, int | float]]:
@@ -1206,6 +1208,8 @@ class TechnosoftEx04:
         ui_pump=None,
         sample_callback=None,
         pvt_velocity_correction: dict[str, float | int | bool] | None = None,
+        pvt_position_correction: dict[str, float | int | bool] | None = None,
+        pvt_queue_config: dict[str, float | int | bool] | None = None,
     ) -> dict[str, float | int | str]:
         if not points:
             raise ValueError("PVT point list is empty")
@@ -1217,7 +1221,35 @@ class TechnosoftEx04:
         correction_kp = float(correction_config.get("kp", 0.0))
         correction_max = abs(float(correction_config.get("max_deg_s", 0.0)))
         correction_alpha = max(0.0, min(0.999, float(correction_config.get("alpha", 0.0))))
-        correction_state = {"deg_s": 0.0}
+        position_correction_config = dict(pvt_position_correction or {})
+        position_correction_enabled = bool(int(float(position_correction_config.get("enable", 0))))
+        position_correction_kp = float(position_correction_config.get("kp", 0.0))
+        position_correction_kp_per_vel = float(position_correction_config.get("kp_per_vel", 0.0))
+        position_correction_max = abs(float(position_correction_config.get("max_deg", 0.0)))
+        position_correction_alpha = max(0.0, min(0.999, float(position_correction_config.get("alpha", 0.0))))
+        position_bias_enabled = bool(int(float(position_correction_config.get("bias_enable", 0))))
+        position_bias_kp = float(position_correction_config.get("bias_kp", 0.0))
+        position_bias_adapt = max(0.0, min(1.0, float(position_correction_config.get("bias_adapt", 0.0))))
+        position_bias_max = abs(float(position_correction_config.get("bias_max_deg", 0.0)))
+        position_integral_enabled = bool(int(float(position_correction_config.get("i_enable", 0))))
+        position_integral_ki = float(position_correction_config.get("i_ki", 0.0))
+        position_integral_max = abs(float(position_correction_config.get("i_max_deg", 0.0)))
+        position_integral_leak = max(0.0, min(1.0, float(position_correction_config.get("i_leak", 1.0))))
+        queue_config = dict(pvt_queue_config or {})
+        queue_target_points = max(0, int(float(queue_config.get("target_points", 0))))
+        queue_refill_points = max(0, int(float(queue_config.get("refill_points", 0))))
+        correction_state = {"deg_s": 0.0, "pos_deg": 0.0, "bias_deg": 0.0, "i_deg": 0.0}
+        last_integral_update = {"elapsed_s": None}
+
+        def corrected_position_iu(point_index: int, base_pos_iu: int) -> int:
+            if (not position_correction_enabled and not position_bias_enabled) or point_index >= len(points) - 1:
+                return base_pos_iu
+            total_correction_deg = (
+                correction_state["pos_deg"]
+                + correction_state["bias_deg"]
+                + correction_state["i_deg"]
+            )
+            return base_pos_iu + int(round(self.deg_to_iu(axis, total_correction_deg)))
 
         def corrected_velocity_iu(point_index: int, base_vel_iu: float) -> float:
             if not correction_enabled or point_index >= len(points) - 1:
@@ -1261,13 +1293,14 @@ class TechnosoftEx04:
 
         self.check(self.dll.TS_CheckForUnrequestedDriveMessages(), "TS_CheckForUnrequestedDriveMessages")
         start_pvt_if_buffer_initialised("initial_status")
-        preload_points = min(buffer_info["pvt_preload_points"], len(points))
+        preload_limit = queue_target_points if queue_target_points > 0 else buffer_info["pvt_preload_points"]
+        preload_points = min(preload_limit, len(points))
         while stream_index < preload_points:
             counter_pc += 1
             pos_iu, vel_iu = points[stream_index]
             self.check(
                 self.dll.TS_SendPVTPoint(
-                    pos_iu,
+                    corrected_position_iu(stream_index, pos_iu),
                     corrected_velocity_iu(stream_index, vel_iu),
                     segment_time_iu,
                     counter_pc,
@@ -1299,7 +1332,11 @@ class TechnosoftEx04:
         def refill_buffer(reason: str) -> int:
             nonlocal counter_pc, stream_index, points_sent, next_refill_allowed
             nonlocal refill_events, last_refill_reason, last_refill_sent, last_refill_messages
-            points_to_add = max(1, buffer_info["pvt_buffer_points"] - buffer_info["pvt_low_level"])
+            points_to_add = (
+                queue_refill_points
+                if queue_refill_points > 0
+                else max(1, buffer_info["pvt_buffer_points"] - buffer_info["pvt_low_level"])
+            )
             target_stream_index = min(len(points), stream_index + points_to_add)
             sent_now = 0
             while stream_index < target_stream_index and not status["buffer_full"]:
@@ -1307,7 +1344,7 @@ class TechnosoftEx04:
                 pos_iu, vel_iu = points[stream_index]
                 self.check(
                     self.dll.TS_SendPVTPoint(
-                        pos_iu,
+                        corrected_position_iu(stream_index, pos_iu),
                         corrected_velocity_iu(stream_index, vel_iu),
                         segment_time_iu,
                         counter_pc,
@@ -1369,6 +1406,24 @@ class TechnosoftEx04:
                     "pvt_velocity_correction_max_deg_s",
                     "pvt_velocity_correction_alpha",
                     "pvt_velocity_correction_deg_s",
+                    "pvt_position_correction_enabled",
+                    "pvt_position_correction_kp",
+                    "pvt_position_correction_kp_per_vel",
+                    "pvt_position_correction_kp_eff",
+                    "pvt_position_correction_max_deg",
+                    "pvt_position_correction_alpha",
+                    "pvt_position_correction_deg",
+                    "pvt_position_bias_enabled",
+                    "pvt_position_bias_kp",
+                    "pvt_position_bias_adapt",
+                    "pvt_position_bias_max_deg",
+                    "pvt_position_bias_deg",
+                    "pvt_position_integral_enabled",
+                    "pvt_position_integral_ki",
+                    "pvt_position_integral_max_deg",
+                    "pvt_position_integral_leak",
+                    "pvt_position_integral_deg",
+                    "pvt_position_total_correction_deg",
                     "target_step_index",
                     "target_step_deg",
                     "target_step_velocity_deg_s",
@@ -1391,6 +1446,8 @@ class TechnosoftEx04:
                     "pvt_buffer_points",
                     "pvt_low_level",
                     "pvt_preload_points",
+                    "pvt_queue_target_points",
+                    "pvt_queue_refill_points",
                     "refill_events",
                     "last_refill_reason",
                     "last_refill_sent",
@@ -1468,6 +1525,48 @@ class TechnosoftEx04:
                         )
                     else:
                         correction_state["deg_s"] = 0.0
+                    position_correction_kp_eff = position_correction_kp + (
+                        position_correction_kp_per_vel * abs(expected_vel_deg_s)
+                    )
+                    if position_correction_enabled and position_correction_kp_eff != 0.0 and position_correction_max > 0.0:
+                        raw_position_correction_deg = -position_correction_kp_eff * actual_error_deg
+                        raw_position_correction_deg = max(
+                            -position_correction_max,
+                            min(position_correction_max, raw_position_correction_deg),
+                        )
+                        correction_state["pos_deg"] = (
+                            position_correction_alpha * correction_state["pos_deg"]
+                            + (1.0 - position_correction_alpha) * raw_position_correction_deg
+                        )
+                    else:
+                        correction_state["pos_deg"] = 0.0
+                    if position_bias_enabled and position_bias_kp != 0.0 and position_bias_adapt > 0.0 and position_bias_max > 0.0:
+                        bias_target_deg = -position_bias_kp * actual_error_deg
+                        bias_target_deg = max(-position_bias_max, min(position_bias_max, bias_target_deg))
+                        correction_state["bias_deg"] += position_bias_adapt * (
+                            bias_target_deg - correction_state["bias_deg"]
+                        )
+                        correction_state["bias_deg"] = max(
+                            -position_bias_max,
+                            min(position_bias_max, correction_state["bias_deg"]),
+                        )
+                    else:
+                        correction_state["bias_deg"] = 0.0
+                    if position_integral_enabled and position_integral_ki != 0.0 and position_integral_max > 0.0:
+                        last_elapsed = last_integral_update["elapsed_s"]
+                        integral_dt = 0.0 if last_elapsed is None else max(0.0, elapsed - float(last_elapsed))
+                        last_integral_update["elapsed_s"] = elapsed
+                        correction_state["i_deg"] = (
+                            position_integral_leak * correction_state["i_deg"]
+                            - position_integral_ki * actual_error_deg * integral_dt
+                        )
+                        correction_state["i_deg"] = max(
+                            -position_integral_max,
+                            min(position_integral_max, correction_state["i_deg"]),
+                        )
+                    else:
+                        correction_state["i_deg"] = 0.0
+                        last_integral_update["elapsed_s"] = elapsed
                     writer.writerow(
                         {
                             "t_s": f"{elapsed:.4f}",
@@ -1483,6 +1582,24 @@ class TechnosoftEx04:
                             "pvt_velocity_correction_max_deg_s": f"{correction_max:.6f}",
                             "pvt_velocity_correction_alpha": f"{correction_alpha:.6f}",
                             "pvt_velocity_correction_deg_s": f"{correction_state['deg_s']:.6f}",
+                            "pvt_position_correction_enabled": int(position_correction_enabled),
+                            "pvt_position_correction_kp": f"{position_correction_kp:.6f}",
+                            "pvt_position_correction_kp_per_vel": f"{position_correction_kp_per_vel:.6f}",
+                            "pvt_position_correction_kp_eff": f"{position_correction_kp_eff:.6f}",
+                            "pvt_position_correction_max_deg": f"{position_correction_max:.6f}",
+                            "pvt_position_correction_alpha": f"{position_correction_alpha:.6f}",
+                            "pvt_position_correction_deg": f"{correction_state['pos_deg']:.6f}",
+                            "pvt_position_bias_enabled": int(position_bias_enabled),
+                            "pvt_position_bias_kp": f"{position_bias_kp:.6f}",
+                            "pvt_position_bias_adapt": f"{position_bias_adapt:.6f}",
+                            "pvt_position_bias_max_deg": f"{position_bias_max:.6f}",
+                            "pvt_position_bias_deg": f"{correction_state['bias_deg']:.6f}",
+                            "pvt_position_integral_enabled": int(position_integral_enabled),
+                            "pvt_position_integral_ki": f"{position_integral_ki:.6f}",
+                            "pvt_position_integral_max_deg": f"{position_integral_max:.6f}",
+                            "pvt_position_integral_leak": f"{position_integral_leak:.6f}",
+                            "pvt_position_integral_deg": f"{correction_state['i_deg']:.6f}",
+                            "pvt_position_total_correction_deg": f"{(correction_state['pos_deg'] + correction_state['bias_deg'] + correction_state['i_deg']):.6f}",
                             "target_step_index": expected_index,
                             "target_step_deg": f"{expected_step_deg:.6f}",
                             "target_step_velocity_deg_s": f"{expected_step_vel_deg_s:.6f}",
@@ -1505,6 +1622,8 @@ class TechnosoftEx04:
                             "pvt_buffer_points": buffer_info["pvt_buffer_points"],
                             "pvt_low_level": buffer_info["pvt_low_level"],
                             "pvt_preload_points": buffer_info["pvt_preload_points"],
+                            "pvt_queue_target_points": queue_target_points,
+                            "pvt_queue_refill_points": queue_refill_points,
                             "refill_events": refill_events,
                             "last_refill_reason": last_refill_reason,
                             "last_refill_sent": last_refill_sent,
@@ -1531,6 +1650,9 @@ class TechnosoftEx04:
                                 "TPOS_minus_target_deg": tpos_error_deg,
                                 "APOS_minus_TPOS_deg": apos_tpos_error_deg,
                                 "pvt_velocity_correction_deg_s": correction_state["deg_s"],
+                                "pvt_position_correction_deg": correction_state["pos_deg"],
+                                "pvt_position_bias_deg": correction_state["bias_deg"],
+                                "pvt_position_integral_deg": correction_state["i_deg"],
                             }
                         )
                     samples_written += 1
@@ -1564,6 +1686,8 @@ class TechnosoftEx04:
                 "pvt_buffer_points": buffer_info["pvt_buffer_points"],
                 "pvt_low_level": buffer_info["pvt_low_level"],
                 "pvt_preload_points": buffer_info["pvt_preload_points"],
+                "pvt_queue_target_points": queue_target_points,
+                "pvt_queue_refill_points": queue_refill_points,
                 "pvt_buffer_old_len_words": buffer_info["pvt_buffer_old_len_words"],
                 "pvt_buffer_len_words": buffer_info["pvt_buffer_len_words"],
                 "pvt_start_reason": update_reason,
@@ -1571,6 +1695,19 @@ class TechnosoftEx04:
                 "pvt_velocity_correction_kp": correction_kp,
                 "pvt_velocity_correction_max_deg_s": correction_max,
                 "pvt_velocity_correction_alpha": correction_alpha,
+                "pvt_position_correction_enabled": int(position_correction_enabled),
+                "pvt_position_correction_kp": position_correction_kp,
+                "pvt_position_correction_kp_per_vel": position_correction_kp_per_vel,
+                "pvt_position_correction_max_deg": position_correction_max,
+                "pvt_position_correction_alpha": position_correction_alpha,
+                "pvt_position_bias_enabled": int(position_bias_enabled),
+                "pvt_position_bias_kp": position_bias_kp,
+                "pvt_position_bias_adapt": position_bias_adapt,
+                "pvt_position_bias_max_deg": position_bias_max,
+                "pvt_position_integral_enabled": int(position_integral_enabled),
+                "pvt_position_integral_ki": position_integral_ki,
+                "pvt_position_integral_max_deg": position_integral_max,
+                "pvt_position_integral_leak": position_integral_leak,
                 "raw_messages": status["raw_messages"],
                 "pvt_messages": status["messages"],
                 "last_message_address": f"0x{status['last_address']:04X}",
