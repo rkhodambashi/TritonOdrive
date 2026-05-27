@@ -1235,19 +1235,48 @@ class TechnosoftEx04:
         position_integral_ki = float(position_correction_config.get("i_ki", 0.0))
         position_integral_max = abs(float(position_correction_config.get("i_max_deg", 0.0)))
         position_integral_leak = max(0.0, min(1.0, float(position_correction_config.get("i_leak", 1.0))))
+        zero_cross_enabled = bool(int(float(position_correction_config.get("zero_cross_enable", 0))))
+        zero_cross_start_deg = float(position_correction_config.get("zero_cross_start_deg", 0.5))
+        zero_cross_stop_deg = float(position_correction_config.get("zero_cross_stop_deg", -0.5))
+        zero_cross_bias_max = abs(float(position_correction_config.get("zero_cross_bias_deg", 0.0)))
+        zero_cross_sign = 1.0 if float(position_correction_config.get("zero_cross_sign", 1.0)) >= 0.0 else -1.0
+        backlash_gate_enabled = bool(int(float(position_correction_config.get("backlash_gate_enable", 0))))
+        backlash_gate_threshold = abs(float(position_correction_config.get("backlash_gate_threshold_deg", 0.02)))
         queue_config = dict(pvt_queue_config or {})
         queue_target_points = max(0, int(float(queue_config.get("target_points", 0))))
         queue_refill_points = max(0, int(float(queue_config.get("refill_points", 0))))
         correction_state = {"deg_s": 0.0, "pos_deg": 0.0, "bias_deg": 0.0, "i_deg": 0.0}
         last_integral_update = {"elapsed_s": None}
 
+        def zero_cross_bias_deg_for_target(target_deg: float) -> float:
+            if not zero_cross_enabled or zero_cross_bias_max <= 0.0:
+                return 0.0
+            span = zero_cross_start_deg - zero_cross_stop_deg
+            if abs(span) < 1e-9:
+                return 0.0
+            phase = (zero_cross_start_deg - target_deg) / span
+            if phase <= 0.0 or phase >= 1.0:
+                return 0.0
+            return zero_cross_sign * zero_cross_bias_max * math.sin(math.pi * phase)
+
+        def point_target_deg(point_index: int) -> float:
+            pos_iu, _vel_iu = points[point_index]
+            return self.iu_to_deg(axis, pos_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
+
         def corrected_position_iu(point_index: int, base_pos_iu: int) -> int:
-            if (not position_correction_enabled and not position_bias_enabled) or point_index >= len(points) - 1:
+            if (
+                not position_correction_enabled
+                and not position_bias_enabled
+                and not position_integral_enabled
+                and not zero_cross_enabled
+            ) or point_index >= len(points) - 1:
                 return base_pos_iu
+            zero_cross_deg = zero_cross_bias_deg_for_target(point_target_deg(point_index))
             total_correction_deg = (
                 correction_state["pos_deg"]
                 + correction_state["bias_deg"]
                 + correction_state["i_deg"]
+                + zero_cross_deg
             )
             return base_pos_iu + int(round(self.deg_to_iu(axis, total_correction_deg)))
 
@@ -1423,6 +1452,15 @@ class TechnosoftEx04:
                     "pvt_position_integral_max_deg",
                     "pvt_position_integral_leak",
                     "pvt_position_integral_deg",
+                    "pvt_zero_cross_enabled",
+                    "pvt_zero_cross_start_deg",
+                    "pvt_zero_cross_stop_deg",
+                    "pvt_zero_cross_bias_max_deg",
+                    "pvt_zero_cross_sign",
+                    "pvt_zero_cross_bias_deg",
+                    "pvt_backlash_gate_enabled",
+                    "pvt_backlash_gate_threshold_deg",
+                    "pvt_backlash_gate_active",
                     "pvt_position_total_correction_deg",
                     "target_step_index",
                     "target_step_deg",
@@ -1516,6 +1554,12 @@ class TechnosoftEx04:
                     actual_error_deg = apos_deg - expected_deg
                     tpos_error_deg = tpos_deg - expected_deg
                     apos_tpos_error_deg = apos_deg - tpos_deg
+                    zero_cross_bias_deg = zero_cross_bias_deg_for_target(expected_deg)
+                    backlash_gate_active = (
+                        backlash_gate_enabled
+                        and backlash_gate_threshold > 0.0
+                        and abs(apos_tpos_error_deg) >= backlash_gate_threshold
+                    )
                     if correction_enabled and correction_kp != 0.0 and correction_max > 0.0:
                         raw_correction_deg_s = -correction_kp * actual_error_deg
                         raw_correction_deg_s = max(-correction_max, min(correction_max, raw_correction_deg_s))
@@ -1540,7 +1584,13 @@ class TechnosoftEx04:
                         )
                     else:
                         correction_state["pos_deg"] = 0.0
-                    if position_bias_enabled and position_bias_kp != 0.0 and position_bias_adapt > 0.0 and position_bias_max > 0.0:
+                    bias_can_update = (
+                        position_bias_enabled
+                        and position_bias_kp != 0.0
+                        and position_bias_adapt > 0.0
+                        and position_bias_max > 0.0
+                    )
+                    if bias_can_update and not backlash_gate_active:
                         bias_target_deg = -position_bias_kp * actual_error_deg
                         bias_target_deg = max(-position_bias_max, min(position_bias_max, bias_target_deg))
                         correction_state["bias_deg"] += position_bias_adapt * (
@@ -1550,20 +1600,26 @@ class TechnosoftEx04:
                             -position_bias_max,
                             min(position_bias_max, correction_state["bias_deg"]),
                         )
-                    else:
+                    elif not bias_can_update:
                         correction_state["bias_deg"] = 0.0
-                    if position_integral_enabled and position_integral_ki != 0.0 and position_integral_max > 0.0:
+                    integral_can_update = (
+                        position_integral_enabled
+                        and position_integral_ki != 0.0
+                        and position_integral_max > 0.0
+                    )
+                    if integral_can_update:
                         last_elapsed = last_integral_update["elapsed_s"]
                         integral_dt = 0.0 if last_elapsed is None else max(0.0, elapsed - float(last_elapsed))
                         last_integral_update["elapsed_s"] = elapsed
-                        correction_state["i_deg"] = (
-                            position_integral_leak * correction_state["i_deg"]
-                            - position_integral_ki * actual_error_deg * integral_dt
-                        )
-                        correction_state["i_deg"] = max(
-                            -position_integral_max,
-                            min(position_integral_max, correction_state["i_deg"]),
-                        )
+                        if not backlash_gate_active:
+                            correction_state["i_deg"] = (
+                                position_integral_leak * correction_state["i_deg"]
+                                - position_integral_ki * actual_error_deg * integral_dt
+                            )
+                            correction_state["i_deg"] = max(
+                                -position_integral_max,
+                                min(position_integral_max, correction_state["i_deg"]),
+                            )
                     else:
                         correction_state["i_deg"] = 0.0
                         last_integral_update["elapsed_s"] = elapsed
@@ -1599,7 +1655,16 @@ class TechnosoftEx04:
                             "pvt_position_integral_max_deg": f"{position_integral_max:.6f}",
                             "pvt_position_integral_leak": f"{position_integral_leak:.6f}",
                             "pvt_position_integral_deg": f"{correction_state['i_deg']:.6f}",
-                            "pvt_position_total_correction_deg": f"{(correction_state['pos_deg'] + correction_state['bias_deg'] + correction_state['i_deg']):.6f}",
+                            "pvt_zero_cross_enabled": int(zero_cross_enabled),
+                            "pvt_zero_cross_start_deg": f"{zero_cross_start_deg:.6f}",
+                            "pvt_zero_cross_stop_deg": f"{zero_cross_stop_deg:.6f}",
+                            "pvt_zero_cross_bias_max_deg": f"{zero_cross_bias_max:.6f}",
+                            "pvt_zero_cross_sign": f"{zero_cross_sign:.6f}",
+                            "pvt_zero_cross_bias_deg": f"{zero_cross_bias_deg:.6f}",
+                            "pvt_backlash_gate_enabled": int(backlash_gate_enabled),
+                            "pvt_backlash_gate_threshold_deg": f"{backlash_gate_threshold:.6f}",
+                            "pvt_backlash_gate_active": int(backlash_gate_active),
+                            "pvt_position_total_correction_deg": f"{(correction_state['pos_deg'] + correction_state['bias_deg'] + correction_state['i_deg'] + zero_cross_bias_deg):.6f}",
                             "target_step_index": expected_index,
                             "target_step_deg": f"{expected_step_deg:.6f}",
                             "target_step_velocity_deg_s": f"{expected_step_vel_deg_s:.6f}",
@@ -1653,6 +1718,14 @@ class TechnosoftEx04:
                                 "pvt_position_correction_deg": correction_state["pos_deg"],
                                 "pvt_position_bias_deg": correction_state["bias_deg"],
                                 "pvt_position_integral_deg": correction_state["i_deg"],
+                                "pvt_zero_cross_bias_deg": zero_cross_bias_deg,
+                                "pvt_backlash_gate_active": int(backlash_gate_active),
+                                "pvt_position_total_correction_deg": (
+                                    correction_state["pos_deg"]
+                                    + correction_state["bias_deg"]
+                                    + correction_state["i_deg"]
+                                    + zero_cross_bias_deg
+                                ),
                             }
                         )
                     samples_written += 1
@@ -1708,6 +1781,13 @@ class TechnosoftEx04:
                 "pvt_position_integral_ki": position_integral_ki,
                 "pvt_position_integral_max_deg": position_integral_max,
                 "pvt_position_integral_leak": position_integral_leak,
+                "pvt_zero_cross_enabled": int(zero_cross_enabled),
+                "pvt_zero_cross_start_deg": zero_cross_start_deg,
+                "pvt_zero_cross_stop_deg": zero_cross_stop_deg,
+                "pvt_zero_cross_bias_max_deg": zero_cross_bias_max,
+                "pvt_zero_cross_sign": zero_cross_sign,
+                "pvt_backlash_gate_enabled": int(backlash_gate_enabled),
+                "pvt_backlash_gate_threshold_deg": backlash_gate_threshold,
                 "raw_messages": status["raw_messages"],
                 "pvt_messages": status["messages"],
                 "last_message_address": f"0x{status['last_address']:04X}",
