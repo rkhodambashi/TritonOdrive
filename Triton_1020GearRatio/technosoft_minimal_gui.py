@@ -543,6 +543,11 @@ def open_satellite_pvt_window() -> None:
     pvt_vcorr_kp_var = tk.StringVar(value="0")
     pvt_vcorr_max_var = tk.StringVar(value="0.2")
     pvt_vcorr_alpha_var = tk.StringVar(value="0")
+    pvt_zero_cross_v_enable_var = tk.StringVar(value="0")
+    pvt_zero_cross_v_start_var = tk.StringVar(value="0.5")
+    pvt_zero_cross_v_stop_var = tk.StringVar(value="-0.5")
+    pvt_zero_cross_v_bias_var = tk.StringVar(value="0.05")
+    pvt_zero_cross_v_sign_var = tk.StringVar(value="1")
     pvt_pcorr_enable_var = tk.StringVar(value="0")
     pvt_pcorr_kp_var = tk.StringVar(value="0")
     pvt_pcorr_kp_per_vel_var = tk.StringVar(value="0")
@@ -556,6 +561,13 @@ def open_satellite_pvt_window() -> None:
     pvt_pi_ki_var = tk.StringVar(value="0.2")
     pvt_pi_max_var = tk.StringVar(value="1")
     pvt_pi_leak_var = tk.StringVar(value="1")
+    pvt_zero_cross_enable_var = tk.StringVar(value="0")
+    pvt_zero_cross_start_var = tk.StringVar(value="0.5")
+    pvt_zero_cross_stop_var = tk.StringVar(value="-0.5")
+    pvt_zero_cross_bias_var = tk.StringVar(value="0.03")
+    pvt_zero_cross_sign_var = tk.StringVar(value="1")
+    pvt_backlash_gate_enable_var = tk.StringVar(value="0")
+    pvt_backlash_gate_threshold_var = tk.StringVar(value="0.02")
     pvt_queue_target_var = tk.StringVar(value="5")
     pvt_queue_refill_var = tk.StringVar(value="2")
     satellite_axes_var = tk.StringVar(value="x")
@@ -752,6 +764,11 @@ def open_satellite_pvt_window() -> None:
         ("V Corr Kp 1/s", pvt_vcorr_kp_var),
         ("V Corr Max deg/s", pvt_vcorr_max_var),
         ("V Corr Alpha", pvt_vcorr_alpha_var),
+        ("Zero X V Enable", pvt_zero_cross_v_enable_var),
+        ("Zero X V Start deg", pvt_zero_cross_v_start_var),
+        ("Zero X V Stop deg", pvt_zero_cross_v_stop_var),
+        ("Zero X V Bias deg/s", pvt_zero_cross_v_bias_var),
+        ("Zero X V Sign", pvt_zero_cross_v_sign_var),
         ("P Corr Enable", pvt_pcorr_enable_var),
         ("P Corr Kp", pvt_pcorr_kp_var),
         ("P Corr Kp/V", pvt_pcorr_kp_per_vel_var),
@@ -765,6 +782,13 @@ def open_satellite_pvt_window() -> None:
         ("P I Ki 1/s", pvt_pi_ki_var),
         ("P I Max deg", pvt_pi_max_var),
         ("P I Leak", pvt_pi_leak_var),
+        ("Zero Cross Enable", pvt_zero_cross_enable_var),
+        ("Zero Cross Start deg", pvt_zero_cross_start_var),
+        ("Zero Cross Stop deg", pvt_zero_cross_stop_var),
+        ("Zero Cross Bias deg", pvt_zero_cross_bias_var),
+        ("Zero Cross Sign", pvt_zero_cross_sign_var),
+        ("Backlash Gate Enable", pvt_backlash_gate_enable_var),
+        ("Backlash Gate deg", pvt_backlash_gate_threshold_var),
         ("PVT Queue Target", pvt_queue_target_var),
         ("PVT Refill Points", pvt_queue_refill_var),
     ]
@@ -1081,6 +1105,11 @@ def open_satellite_pvt_window() -> None:
                     "kp": float(pvt_vcorr_kp_var.get()),
                     "max_deg_s": float(pvt_vcorr_max_var.get()),
                     "alpha": float(pvt_vcorr_alpha_var.get()),
+                    "zero_cross_velocity_enable": int(float(pvt_zero_cross_v_enable_var.get())),
+                    "zero_cross_velocity_start_deg": float(pvt_zero_cross_v_start_var.get()),
+                    "zero_cross_velocity_stop_deg": float(pvt_zero_cross_v_stop_var.get()),
+                    "zero_cross_velocity_bias_deg_s": float(pvt_zero_cross_v_bias_var.get()),
+                    "zero_cross_velocity_sign": float(pvt_zero_cross_v_sign_var.get()),
                 }
                 pvt_position_correction = {
                     "enable": int(float(pvt_pcorr_enable_var.get())),
@@ -1096,6 +1125,13 @@ def open_satellite_pvt_window() -> None:
                     "i_ki": float(pvt_pi_ki_var.get()),
                     "i_max_deg": float(pvt_pi_max_var.get()),
                     "i_leak": float(pvt_pi_leak_var.get()),
+                    "zero_cross_enable": int(float(pvt_zero_cross_enable_var.get())),
+                    "zero_cross_start_deg": float(pvt_zero_cross_start_var.get()),
+                    "zero_cross_stop_deg": float(pvt_zero_cross_stop_var.get()),
+                    "zero_cross_bias_deg": float(pvt_zero_cross_bias_var.get()),
+                    "zero_cross_sign": float(pvt_zero_cross_sign_var.get()),
+                    "backlash_gate_enable": int(float(pvt_backlash_gate_enable_var.get())),
+                    "backlash_gate_threshold_deg": float(pvt_backlash_gate_threshold_var.get()),
                 }
                 pvt_queue_config = {
                     "target_points": int(float(pvt_queue_target_var.get())),
