@@ -53,7 +53,7 @@ PVT_LOG_DIR = Path(__file__).resolve().parent / "tracking_logs" / "technosoft_pv
 
 # Hard-code these after placing each axis at vertical zero and pressing
 # "Set Vertical Zero" in the GUI.
-X_VERTICAL_ZERO_IU = 519296
+X_VERTICAL_ZERO_IU = 335855
 Y_VERTICAL_ZERO_IU = 0
 
 POWER_OFF = 0
@@ -1221,6 +1221,13 @@ class TechnosoftEx04:
         correction_kp = float(correction_config.get("kp", 0.0))
         correction_max = abs(float(correction_config.get("max_deg_s", 0.0)))
         correction_alpha = max(0.0, min(0.999, float(correction_config.get("alpha", 0.0))))
+        zero_cross_velocity_enabled = bool(int(float(correction_config.get("zero_cross_velocity_enable", 0))))
+        zero_cross_velocity_start_deg = float(correction_config.get("zero_cross_velocity_start_deg", 0.5))
+        zero_cross_velocity_stop_deg = float(correction_config.get("zero_cross_velocity_stop_deg", -0.5))
+        zero_cross_velocity_bias_max = abs(float(correction_config.get("zero_cross_velocity_bias_deg_s", 0.0)))
+        zero_cross_velocity_sign = (
+            1.0 if float(correction_config.get("zero_cross_velocity_sign", 1.0)) >= 0.0 else -1.0
+        )
         position_correction_config = dict(pvt_position_correction or {})
         position_correction_enabled = bool(int(float(position_correction_config.get("enable", 0))))
         position_correction_kp = float(position_correction_config.get("kp", 0.0))
@@ -1259,6 +1266,17 @@ class TechnosoftEx04:
                 return 0.0
             return zero_cross_sign * zero_cross_bias_max * math.sin(math.pi * phase)
 
+        def zero_cross_velocity_bias_deg_s_for_target(target_deg: float) -> float:
+            if not zero_cross_velocity_enabled or zero_cross_velocity_bias_max <= 0.0:
+                return 0.0
+            span = zero_cross_velocity_start_deg - zero_cross_velocity_stop_deg
+            if abs(span) < 1e-9:
+                return 0.0
+            phase = (zero_cross_velocity_start_deg - target_deg) / span
+            if phase <= 0.0 or phase >= 1.0:
+                return 0.0
+            return zero_cross_velocity_sign * zero_cross_velocity_bias_max * math.sin(math.pi * phase)
+
         def point_target_deg(point_index: int) -> float:
             pos_iu, _vel_iu = points[point_index]
             return self.iu_to_deg(axis, pos_iu - int(VERTICAL_ZERO_IU[axis.lower()]))
@@ -1281,9 +1299,14 @@ class TechnosoftEx04:
             return base_pos_iu + int(round(self.deg_to_iu(axis, total_correction_deg)))
 
         def corrected_velocity_iu(point_index: int, base_vel_iu: float) -> float:
-            if not correction_enabled or point_index >= len(points) - 1:
+            if point_index >= len(points) - 1:
                 return base_vel_iu
-            return base_vel_iu + self.velocity_deg_s_to_iu(axis, correction_state["deg_s"])
+            feedback_velocity_deg_s = correction_state["deg_s"] if correction_enabled else 0.0
+            zero_cross_velocity_deg_s = zero_cross_velocity_bias_deg_s_for_target(point_target_deg(point_index))
+            return base_vel_iu + self.velocity_deg_s_to_iu(
+                axis,
+                feedback_velocity_deg_s + zero_cross_velocity_deg_s,
+            )
 
         self.check(self.dll.TS_GOTO(0x4000), "TS_GOTO(0x4000)")
         buffer_info = self._pvt_setup(axis)
@@ -1435,6 +1458,13 @@ class TechnosoftEx04:
                     "pvt_velocity_correction_max_deg_s",
                     "pvt_velocity_correction_alpha",
                     "pvt_velocity_correction_deg_s",
+                    "pvt_zero_cross_velocity_enabled",
+                    "pvt_zero_cross_velocity_start_deg",
+                    "pvt_zero_cross_velocity_stop_deg",
+                    "pvt_zero_cross_velocity_bias_max_deg_s",
+                    "pvt_zero_cross_velocity_sign",
+                    "pvt_zero_cross_velocity_bias_deg_s",
+                    "pvt_velocity_total_correction_deg_s",
                     "pvt_position_correction_enabled",
                     "pvt_position_correction_kp",
                     "pvt_position_correction_kp_per_vel",
@@ -1555,6 +1585,7 @@ class TechnosoftEx04:
                     tpos_error_deg = tpos_deg - expected_deg
                     apos_tpos_error_deg = apos_deg - tpos_deg
                     zero_cross_bias_deg = zero_cross_bias_deg_for_target(expected_deg)
+                    zero_cross_velocity_bias_deg_s = zero_cross_velocity_bias_deg_s_for_target(expected_deg)
                     backlash_gate_active = (
                         backlash_gate_enabled
                         and backlash_gate_threshold > 0.0
@@ -1638,6 +1669,13 @@ class TechnosoftEx04:
                             "pvt_velocity_correction_max_deg_s": f"{correction_max:.6f}",
                             "pvt_velocity_correction_alpha": f"{correction_alpha:.6f}",
                             "pvt_velocity_correction_deg_s": f"{correction_state['deg_s']:.6f}",
+                            "pvt_zero_cross_velocity_enabled": int(zero_cross_velocity_enabled),
+                            "pvt_zero_cross_velocity_start_deg": f"{zero_cross_velocity_start_deg:.6f}",
+                            "pvt_zero_cross_velocity_stop_deg": f"{zero_cross_velocity_stop_deg:.6f}",
+                            "pvt_zero_cross_velocity_bias_max_deg_s": f"{zero_cross_velocity_bias_max:.6f}",
+                            "pvt_zero_cross_velocity_sign": f"{zero_cross_velocity_sign:.6f}",
+                            "pvt_zero_cross_velocity_bias_deg_s": f"{zero_cross_velocity_bias_deg_s:.6f}",
+                            "pvt_velocity_total_correction_deg_s": f"{(correction_state['deg_s'] + zero_cross_velocity_bias_deg_s):.6f}",
                             "pvt_position_correction_enabled": int(position_correction_enabled),
                             "pvt_position_correction_kp": f"{position_correction_kp:.6f}",
                             "pvt_position_correction_kp_per_vel": f"{position_correction_kp_per_vel:.6f}",
@@ -1715,6 +1753,10 @@ class TechnosoftEx04:
                                 "TPOS_minus_target_deg": tpos_error_deg,
                                 "APOS_minus_TPOS_deg": apos_tpos_error_deg,
                                 "pvt_velocity_correction_deg_s": correction_state["deg_s"],
+                                "pvt_zero_cross_velocity_bias_deg_s": zero_cross_velocity_bias_deg_s,
+                                "pvt_velocity_total_correction_deg_s": (
+                                    correction_state["deg_s"] + zero_cross_velocity_bias_deg_s
+                                ),
                                 "pvt_position_correction_deg": correction_state["pos_deg"],
                                 "pvt_position_bias_deg": correction_state["bias_deg"],
                                 "pvt_position_integral_deg": correction_state["i_deg"],
@@ -1768,6 +1810,11 @@ class TechnosoftEx04:
                 "pvt_velocity_correction_kp": correction_kp,
                 "pvt_velocity_correction_max_deg_s": correction_max,
                 "pvt_velocity_correction_alpha": correction_alpha,
+                "pvt_zero_cross_velocity_enabled": int(zero_cross_velocity_enabled),
+                "pvt_zero_cross_velocity_start_deg": zero_cross_velocity_start_deg,
+                "pvt_zero_cross_velocity_stop_deg": zero_cross_velocity_stop_deg,
+                "pvt_zero_cross_velocity_bias_max_deg_s": zero_cross_velocity_bias_max,
+                "pvt_zero_cross_velocity_sign": zero_cross_velocity_sign,
                 "pvt_position_correction_enabled": int(position_correction_enabled),
                 "pvt_position_correction_kp": position_correction_kp,
                 "pvt_position_correction_kp_per_vel": position_correction_kp_per_vel,
