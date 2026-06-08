@@ -1,0 +1,107 @@
+ok. This is the order let me know what you think:
+1- finish tuning this branch: position mode+pos_filter+vel_ff
+2- add torque feedforward
+2- lets try velocity ramp on that velocity mode and feed forward branch 
+3- try the POSITION_CONTROL + POS_FILTER+sgp4 vel_ff+outer SPI
+
+comparison of these three should give me enough data to decide on the final architecture
+
+
+	switch		stay		
+
+
+car 	1750		1500		
+
+home1	2100		1500		
+
+home2	4604		5620
+
+
+
+1. The "Query-Response" Sync
+Instead of calculating the TLE position based on the PC's clock, do this:
+
+    Request the position from the ODrive.
+    The moment the data arrives, take a high-resolution timestamp.
+    Calculate the TLE position for that specific timestamp.
+    Subtract them to find your error.
+    This ensures you are comparing "apples to apples" even if Windows delays your loop.
+
+cmd inter	0.05 
+horizon	2
+point spacing	0.05
+max angel step	0.05
+min spacing	0.01
+lead	0.05
+cmd alpha	0.8
+spi corr x	10
+spi int x	1
+spi deriv x	2
+torque bias x	0
+torque grav x	0
+	
+filter bw	20
+capture err	0.5
+rebuild margin	0.25
+prepoint lead	30
+ff scale x	1
+ff scale y	0.1
+cmd alpha y 	0.1
+spi corr y	10
+spi int y	0.2
+spi deriv y	0.1
+torque bias y	0
+torque grav y	0
+
+0.05
+2
+0.05
+0.05
+0.01
+0.05
+0.3
+1
+0
+0
+0
+0
+
+20
+0.5
+0.25
+30
+1
+0.1
+0.1
+1
+0.2
+0.1
+0
+0
+======
+0.05
+2
+0.05
+0.05
+0.01
+0.05
+0.3
+1
+0
+0
+0
+0
+
+20
+0.5
+0.25
+30
+1
+1
+0.3
+1
+0.02
+0
+0
+0
+
